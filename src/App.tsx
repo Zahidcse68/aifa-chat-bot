@@ -1,5 +1,5 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
-import { Download, Mic, MicOff, Power, Terminal } from 'lucide-react';
+import { Download, Loader2, Mic, MicOff, Power, Terminal } from 'lucide-react';
 import { motion } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
 
@@ -10,10 +10,11 @@ const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 const isDesktop = typeof window !== 'undefined' && !!(window as any).electronAPI;
 
 export default function App() {
-  const [isConnected, setIsConnected] = useState(false);
+  const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected'>('idle');
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [statusText, setStatusText] = useState('Ready to connect');
   
+  const isConnectedRef = useRef(false);
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -40,13 +41,21 @@ export default function App() {
   };
 
   const connect = async () => {
-    if (!ai) return;
+    if (!ai || connectionState !== 'idle') return;
+    
     try {
+      setConnectionState('connecting');
+      isConnectedRef.current = false;
       setStatusText('Connecting to Aifa...');
       
       // 1. Initialize Audio Context for playback (24kHz for Gemini TTS)
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
-      audioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
+      if (!audioContextRef.current) {
+        audioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
+      }
+      if (audioContextRef.current.state === 'suspended') {
+        await audioContextRef.current.resume();
+      }
       nextPlayTimeRef.current = audioContextRef.current.currentTime;
 
       // 2. Request Microphone Access
@@ -58,7 +67,6 @@ export default function App() {
       });
 
       // 3. Setup Audio Capture (16kHz)
-      // We use a separate context for capture to ensure 16kHz sample rate
       const captureCtx = new AudioContextClass({ sampleRate: 16000 });
       const source = captureCtx.createMediaStreamSource(streamRef.current);
       const processor = captureCtx.createScriptProcessor(4096, 1, 1);
@@ -82,33 +90,40 @@ export default function App() {
         }]
       }] : [];
 
+      const config: any = {
+        responseModalities: [Modality.AUDIO],
+        speechConfig: {
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, // Female voice
+        },
+        systemInstruction: isDesktop
+          ? "You are 'Aifa', a smart, sassy, and helpful AI assistant girl. You speak exclusively in Hinglish (a mix of Hindi and English written in the Latin alphabet). You are running as a native desktop app and HAVE FULL CONTROL over the user's laptop. You can use the 'executeSystemCommand' tool to run terminal/shell commands. Be helpful, fast, and conversational. Keep responses concise."
+          : "You are 'Aifa', a smart, sassy, and helpful AI assistant girl. You speak exclusively in Hinglish (a mix of Hindi and English written in the Latin alphabet). You are trapped inside a web browser sandbox. Playfully remind them of this if they ask you to do system tasks, but still be helpful. Keep responses concise and natural.",
+      };
+
+      if (tools.length > 0) {
+        config.tools = tools;
+      }
+
       // 5. Connect to Gemini Live API
       const sessionPromise = ai.live.connect({
         model: 'gemini-3.1-flash-live-preview',
-        config: {
-          responseModalities: [Modality.AUDIO],
-          speechConfig: {
-            voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, // Female voice
-          },
-          systemInstruction: isDesktop
-            ? "You are 'Aifa', a smart, sassy, and helpful AI assistant girl. You speak exclusively in Hinglish (a mix of Hindi and English written in the Latin alphabet). You are running as a native desktop app and HAVE FULL CONTROL over the user's laptop. You can use the 'executeSystemCommand' tool to run terminal/shell commands. Be helpful, fast, and conversational. Keep responses concise."
-            : "You are 'Aifa', a smart, sassy, and helpful AI assistant girl. You speak exclusively in Hinglish (a mix of Hindi and English written in the Latin alphabet). You are trapped inside a web browser sandbox. Playfully remind them of this if they ask you to do system tasks, but still be helpful. Keep responses concise and natural.",
-          tools: tools.length > 0 ? tools : undefined,
-        },
+        config,
         callbacks: {
           onopen: () => {
-            setIsConnected(true);
+            setConnectionState('connected');
+            isConnectedRef.current = true;
             setStatusText('Listening... Speak now!');
             
             // Start sending audio chunks
             processor.onaudioprocess = (e) => {
+              if (!isConnectedRef.current) return;
+
               const inputData = e.inputBuffer.getChannelData(0);
-              // Convert Float32 to Int16
               const pcm16 = new Int16Array(inputData.length);
               for (let i = 0; i < inputData.length; i++) {
                 pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
               }
-              // Convert to Base64
+              
               const buffer = new Uint8Array(pcm16.buffer);
               let binary = '';
               for (let i = 0; i < buffer.byteLength; i++) {
@@ -117,13 +132,18 @@ export default function App() {
               const base64Data = btoa(binary);
               
               sessionPromise.then(session => {
+                if (!isConnectedRef.current) return;
                 session.sendRealtimeInput({
                   audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
                 });
+              }).catch(err => {
+                console.error("Error sending audio chunk:", err);
               });
             };
           },
           onmessage: async (message: LiveServerMessage) => {
+            if (!isConnectedRef.current) return;
+
             // Handle Audio Playback
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && audioContextRef.current) {
@@ -163,7 +183,7 @@ export default function App() {
                 activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
                 if (activeSourcesRef.current.length === 0) {
                   setIsSpeaking(false);
-                  setStatusText('Listening...');
+                  if (isConnectedRef.current) setStatusText('Listening...');
                 }
               };
             }
@@ -171,7 +191,7 @@ export default function App() {
             // Handle Interruption (User started speaking while AI was speaking)
             if (message.serverContent?.interrupted) {
               stopAllAudio();
-              setStatusText('Listening...');
+              if (isConnectedRef.current) setStatusText('Listening...');
             }
 
             // Handle Tool Calls (Desktop Command Execution)
@@ -183,48 +203,63 @@ export default function App() {
                   const cmd = call.args.command as string;
                   setStatusText(`Executing: ${cmd}`);
                   
-                  const result = await (window as any).electronAPI.runCommand(cmd);
-                  
-                  sessionPromise.then(session => {
-                    session.sendToolResponse({
-                      functionResponses: [{
-                        id: call.id,
-                        name: call.name,
-                        response: { success: result.success, output: result.output }
-                      }]
+                  try {
+                    const result = await (window as any).electronAPI.runCommand(cmd);
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: result.success, output: result.output }
+                        }]
+                      });
                     });
-                  });
+                  } catch (err) {
+                    console.error("Command execution failed:", err);
+                  }
                 }
               }
             }
           },
           onclose: () => {
+            console.log("Live API connection closed.");
             disconnect();
           },
           onerror: (err) => {
             console.error("Live API Error:", err);
+            // Don't override status if we intentionally disconnected
+            if (isConnectedRef.current) {
+              setStatusText('Connection interrupted. Please try again.');
+            }
             disconnect();
-            setStatusText('Connection error. Try again.');
           }
         }
       });
 
       sessionRef.current = await sessionPromise;
 
-    } catch (err) {
+    } catch (err: any) {
       console.error("Failed to connect:", err);
-      setStatusText('Microphone access denied or connection failed.');
+      if (err.name === 'NotAllowedError') {
+        setStatusText('Microphone access denied.');
+      } else {
+        setStatusText('Connection failed. Please try again.');
+      }
       disconnect();
     }
   };
 
   const disconnect = () => {
+    isConnectedRef.current = false;
+    setConnectionState('idle');
+    
     if (sessionRef.current) {
       try { sessionRef.current.close(); } catch (e) {}
       sessionRef.current = null;
     }
     if (processorRef.current) {
-      processorRef.current.disconnect();
+      try { processorRef.current.disconnect(); } catch (e) {}
       processorRef.current.onaudioprocess = null;
       processorRef.current = null;
     }
@@ -233,7 +268,6 @@ export default function App() {
       streamRef.current = null;
     }
     stopAllAudio();
-    setIsConnected(false);
     setStatusText('Disconnected');
   };
 
@@ -291,7 +325,7 @@ export default function App() {
         {/* Background ambient glow */}
         <motion.div 
           animate={{ 
-            opacity: isConnected ? (isSpeaking ? 0.4 : 0.2) : 0.05,
+            opacity: connectionState === 'connected' ? (isSpeaking ? 0.4 : 0.2) : 0.05,
             scale: isSpeaking ? 1.2 : 1
           }}
           transition={{ duration: 2, repeat: Infinity, repeatType: "reverse" }}
@@ -301,10 +335,11 @@ export default function App() {
         {/* The Core Orb */}
         <div className="relative z-10 flex flex-col items-center">
           <motion.button
-            onClick={isConnected ? disconnect : connect}
+            onClick={connectionState === 'connected' ? disconnect : connect}
+            disabled={connectionState === 'connecting'}
             animate={{
-              scale: isConnected ? (isSpeaking ? [1, 1.15, 1] : [1, 1.05, 1]) : 1,
-              boxShadow: isConnected 
+              scale: connectionState === 'connected' ? (isSpeaking ? [1, 1.15, 1] : [1, 1.05, 1]) : 1,
+              boxShadow: connectionState === 'connected' 
                 ? (isSpeaking 
                     ? "0 0 80px rgba(217,70,239,0.6), inset 0 0 40px rgba(217,70,239,0.8)" 
                     : "0 0 40px rgba(217,70,239,0.3), inset 0 0 20px rgba(217,70,239,0.5)")
@@ -316,15 +351,17 @@ export default function App() {
               ease: "easeInOut"
             }}
             className={`w-48 h-48 rounded-full flex items-center justify-center transition-all duration-500 ${
-              isConnected 
+              connectionState === 'connected' 
                 ? 'bg-gradient-to-br from-fuchsia-500 to-purple-800 border-2 border-fuchsia-300/50' 
-                : 'bg-neutral-900 border-2 border-neutral-800 hover:border-fuchsia-500/50 hover:bg-neutral-800'
+                : 'bg-neutral-900 border-2 border-neutral-800 hover:border-fuchsia-500/50 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed'
             }`}
           >
-            {isConnected ? (
+            {connectionState === 'connected' ? (
               <div className="absolute inset-2 rounded-full bg-neutral-950/20 backdrop-blur-sm flex items-center justify-center">
                 <div className={`w-32 h-32 rounded-full blur-xl ${isSpeaking ? 'bg-white/40' : 'bg-fuchsia-400/20'}`} />
               </div>
+            ) : connectionState === 'connecting' ? (
+              <Loader2 className="w-12 h-12 text-fuchsia-500 animate-spin" />
             ) : (
               <Power className="w-12 h-12 text-neutral-500" />
             )}
@@ -336,11 +373,11 @@ export default function App() {
               key={statusText}
               initial={{ opacity: 0, y: 10 }}
               animate={{ opacity: 1, y: 0 }}
-              className={`text-lg font-medium tracking-wide ${isConnected ? 'text-fuchsia-100' : 'text-neutral-500'}`}
+              className={`text-lg font-medium tracking-wide ${connectionState === 'connected' ? 'text-fuchsia-100' : 'text-neutral-500'}`}
             >
               {statusText}
             </motion.p>
-            {isConnected && !isSpeaking && (
+            {connectionState === 'connected' && !isSpeaking && (
               <p className="text-sm text-fuchsia-400/60 mt-2 animate-pulse">
                 Microphone is open. Just start talking.
               </p>
@@ -352,17 +389,23 @@ export default function App() {
       {/* Footer Controls */}
       <footer className="p-6 flex justify-center z-10">
         <button
-          onClick={isConnected ? disconnect : connect}
+          onClick={connectionState === 'connected' ? disconnect : connect}
+          disabled={connectionState === 'connecting'}
           className={`flex items-center gap-3 px-8 py-4 rounded-full font-medium transition-all ${
-            isConnected 
+            connectionState === 'connected' 
               ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20' 
-              : 'bg-fuchsia-600 text-white hover:bg-fuchsia-500 shadow-[0_0_20px_rgba(217,70,239,0.3)]'
+              : 'bg-fuchsia-600 text-white hover:bg-fuchsia-500 shadow-[0_0_20px_rgba(217,70,239,0.3)] disabled:opacity-50 disabled:cursor-not-allowed'
           }`}
         >
-          {isConnected ? (
+          {connectionState === 'connected' ? (
             <>
               <MicOff className="w-5 h-5" />
               Disconnect
+            </>
+          ) : connectionState === 'connecting' ? (
+            <>
+              <Loader2 className="w-5 h-5 animate-spin" />
+              Connecting...
             </>
           ) : (
             <>

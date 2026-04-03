@@ -1,4 +1,5 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
+import * as faceapi from 'face-api.js';
 import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Cloud, Crosshair, Download, Droplets, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, ShieldCheck, Square, Terminal, Thermometer, UserPlus, Wind } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
@@ -171,6 +172,7 @@ export default function App() {
   const [isSetupComplete, setIsSetupComplete] = useState<boolean | null>(null);
   const userName = 'Master';
   const [userFaceData, setUserFaceData] = useState<string | null>(null);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
   
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [authStatus, setAuthStatus] = useState<'locked' | 'scanning_face' | 'failed' | 'setup_face' | 'setup_done'>('locked');
@@ -213,10 +215,25 @@ export default function App() {
 
   // --- Initialization & Clock Loop ---
   useEffect(() => {
+    const loadModels = async () => {
+      try {
+        const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+        await Promise.all([
+          faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+        ]);
+        setModelsLoaded(true);
+      } catch (e) {
+        console.error("Failed to load face-api models", e);
+      }
+    };
+    loadModels();
+
     // Check Setup
-    const savedFace = localStorage.getItem('aifa_user_face');
+    const savedFace = localStorage.getItem('aifa_user_face_descriptor');
     if (savedFace) {
-      setUserFaceData(savedFace);
+      setUserFaceData('enrolled');
       setIsSetupComplete(true);
     } else {
       setIsSetupComplete(false);
@@ -298,6 +315,10 @@ export default function App() {
 
   // --- Face Scanning ---
   const startFaceScan = async (isSetup: boolean = false) => {
+    if (!modelsLoaded) {
+      speakText("Still loading neural models. Please wait.");
+      return;
+    }
     setAuthStatus(isSetup ? 'setup_face' : 'scanning_face');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: true });
@@ -306,37 +327,78 @@ export default function App() {
         videoRef.current.play();
       }
       
-      // Simulate scanning process
-      setTimeout(() => {
-        let faceData = 'dummy_face_data';
-        if (canvasRef.current && videoRef.current) {
-          const ctx = canvasRef.current.getContext('2d');
-          if (ctx) {
-            ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
-            faceData = canvasRef.current.toDataURL('image/jpeg');
+      let scanCount = 0;
+      const maxScans = isSetup ? 3 : 1; // 3 scans for setup, 1 for login
+      const descriptors: Float32Array[] = [];
+
+      const scanInterval = setInterval(async () => {
+        if (videoRef.current && videoRef.current.readyState === 4) {
+          const detection = await faceapi.detectSingleFace(videoRef.current).withFaceLandmarks().withFaceDescriptor();
+          
+          if (detection) {
+            descriptors.push(detection.descriptor);
+            scanCount++;
+            if (isSetup) {
+               speakText(`Face captured. ${3 - scanCount} remaining.`);
+            }
+          } else {
+             if (isSetup) speakText("No face detected. Please look at the camera.");
+          }
+
+          if (scanCount >= maxScans) {
+            clearInterval(scanInterval);
+            stream.getTracks().forEach(track => track.stop());
+
+            if (isSetup) {
+              // Save the first descriptor as an array
+              const descriptorArray = Array.from(descriptors[0]);
+              localStorage.setItem('aifa_user_face_descriptor', JSON.stringify(descriptorArray));
+              localStorage.setItem('aifa_user_face', 'enrolled');
+              setUserFaceData('enrolled');
+              playSfx('boot');
+              setAuthStatus('setup_done');
+              speakText("Setup complete. Login now with your face.", () => {
+                setIsSetupComplete(true);
+                setAuthStatus('locked');
+              });
+            } else {
+              const savedDescriptorStr = localStorage.getItem('aifa_user_face_descriptor');
+              if (savedDescriptorStr) {
+                const savedDescriptor = new Float32Array(JSON.parse(savedDescriptorStr));
+                const distance = faceapi.euclideanDistance(descriptors[0], savedDescriptor);
+                if (distance < 0.5) { // Threshold for match
+                  playSfx('auth_success');
+                  setIsUnlocked(true);
+                  speakText(`Welcome back, Master. Initializing Aifa core.`);
+                } else {
+                  playSfx('auth_fail');
+                  setAuthStatus('failed');
+                  speakText("Wrong face detected. Access denied.");
+                  setTimeout(() => setAuthStatus('locked'), 2000);
+                }
+              } else {
+                 playSfx('auth_fail');
+                 setAuthStatus('failed');
+                 speakText("No enrolled face found.");
+                 setTimeout(() => setAuthStatus('locked'), 2000);
+              }
+            }
           }
         }
-        
-        // Stop camera
-        stream.getTracks().forEach(track => track.stop());
-        
-        if (isSetup) {
-          localStorage.setItem('aifa_user_face', faceData);
-          setUserFaceData(faceData);
-          playSfx('boot');
-          setAuthStatus('setup_done');
-          speakText("Setup complete. Initializing Aifa core.", () => {
-            setIsSetupComplete(true);
-            setIsUnlocked(true);
-          });
-        } else {
-          // In a real app, you'd compare the faceData here.
-          // For this demo, we'll just assume it matches if they got this far.
-          playSfx('auth_success');
-          setIsUnlocked(true);
-          speakText(`Welcome back, Master. Initializing Aifa core.`);
+      }, 1500);
+
+      // Timeout after 15 seconds
+      setTimeout(() => {
+        if (scanCount < maxScans) {
+          clearInterval(scanInterval);
+          stream.getTracks().forEach(track => track.stop());
+          playSfx('auth_fail');
+          setAuthStatus('failed');
+          speakText("Scan timed out.");
+          setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_face'), 2000);
         }
-      }, 3000); // 3 seconds scan time
+      }, 15000);
+
     } catch (err) {
       console.error("Camera access denied", err);
       playSfx('auth_fail');
@@ -779,10 +841,10 @@ export default function App() {
                 startFaceScan(true);
               });
             }}
-            disabled={authStatus === 'setup_face'}
+            disabled={authStatus === 'setup_face' || !modelsLoaded}
             className="px-8 py-3 border border-cyan-500/50 hover:bg-cyan-900/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all tracking-widest text-sm disabled:opacity-50"
           >
-            {authStatus === 'setup_face' ? 'PROCESSING...' : 'START ENROLLMENT'}
+            {!modelsLoaded ? 'LOADING NEURAL MODELS...' : authStatus === 'setup_face' ? 'PROCESSING...' : 'START ENROLLMENT'}
           </button>
           <canvas ref={canvasRef} className="hidden" width="640" height="480" />
         </motion.div>
@@ -822,10 +884,10 @@ export default function App() {
 
           <button 
             onClick={() => startFaceScan(false)}
-            disabled={authStatus === 'scanning_face'}
+            disabled={authStatus === 'scanning_face' || !modelsLoaded}
             className="px-8 py-3 border border-cyan-500/50 hover:bg-cyan-900/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all tracking-widest text-sm disabled:opacity-50"
           >
-            {authStatus === 'scanning_face' ? 'SCANNING BIOMETRICS...' : 'INITIATE FACIAL SCAN'}
+            {!modelsLoaded ? 'LOADING NEURAL MODELS...' : authStatus === 'scanning_face' ? 'SCANNING BIOMETRICS...' : 'INITIATE FACIAL SCAN'}
           </button>
           <canvas ref={canvasRef} className="hidden" width="640" height="480" />
           

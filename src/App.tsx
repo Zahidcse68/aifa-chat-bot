@@ -1,6 +1,6 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
-import { Download, Loader2, Mic, MicOff, Power, Terminal } from 'lucide-react';
-import { motion } from 'motion/react';
+import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Crosshair, Download, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, ShieldCheck, Square, Terminal, UserPlus } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
 
 // Initialize Gemini API safely
@@ -9,10 +9,139 @@ const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const isDesktop = typeof window !== 'undefined' && !!(window as any).electronAPI;
 
+// --- SFX Engine (Web Audio API) ---
+let sfxCtx: AudioContext | null = null;
+const initSfx = () => {
+  if (!sfxCtx) sfxCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+  if (sfxCtx.state === 'suspended') sfxCtx.resume();
+};
+
+const playSfx = (type: 'auth_success' | 'auth_fail' | 'task_action' | 'alarm' | 'boot') => {
+  if (!sfxCtx) return;
+  const osc = sfxCtx.createOscillator();
+  const gain = sfxCtx.createGain();
+  osc.connect(gain);
+  gain.connect(sfxCtx.destination);
+  const now = sfxCtx.currentTime;
+  
+  if (type === 'auth_success') {
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(880, now);
+    osc.frequency.exponentialRampToValueAtTime(1760, now + 0.1);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+    osc.start(now);
+    osc.stop(now + 0.4);
+  } else if (type === 'auth_fail') {
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(150, now);
+    osc.frequency.exponentialRampToValueAtTime(80, now + 0.3);
+    gain.gain.setValueAtTime(0.3, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.3);
+    osc.start(now);
+    osc.stop(now + 0.3);
+  } else if (type === 'task_action') {
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(1200, now);
+    osc.frequency.setValueAtTime(1800, now + 0.1);
+    gain.gain.setValueAtTime(0.1, now);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+    osc.start(now);
+    osc.stop(now + 0.2);
+  } else if (type === 'alarm') {
+    osc.type = 'square';
+    osc.frequency.setValueAtTime(800, now);
+    osc.frequency.setValueAtTime(1200, now + 0.2);
+    osc.frequency.setValueAtTime(800, now + 0.4);
+    gain.gain.setValueAtTime(0.2, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.5);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+    osc.start(now);
+    osc.stop(now + 0.6);
+  } else if (type === 'boot') {
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(200, now);
+    osc.frequency.exponentialRampToValueAtTime(800, now + 1);
+    gain.gain.setValueAtTime(0, now);
+    gain.gain.linearRampToValueAtTime(0.2, now + 0.5);
+    gain.gain.exponentialRampToValueAtTime(0.01, now + 1.5);
+    osc.start(now);
+    osc.stop(now + 1.5);
+  }
+};
+
+// --- TTS Engine for Auth Prompts ---
+const speakText = (text: string, onEnd?: () => void) => {
+  const synth = window.speechSynthesis;
+  const utterance = new SpeechSynthesisUtterance(text);
+  
+  const voices = synth.getVoices();
+  const femaleVoice = voices.find(v => 
+    v.name.includes('Female') || 
+    v.name.includes('Google UK English Female') || 
+    v.lang.includes('en-IN') || 
+    v.lang.includes('hi-IN')
+  );
+  if (femaleVoice) utterance.voice = femaleVoice;
+  
+  utterance.pitch = 1.3; 
+  utterance.rate = 1.1;
+  
+  if (onEnd) utterance.onend = onEnd;
+  synth.speak(utterance);
+};
+
+// --- Animated Graph Component ---
+const AnimatedGraph = ({ active }: { active: boolean }) => {
+  return (
+    <div className="flex items-end gap-1 h-24 p-4 bg-cyan-950/30 rounded-xl border border-cyan-500/30 relative overflow-hidden">
+      <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.1)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.1)_1px,transparent_1px)] bg-[size:10px_10px]" />
+      {[...Array(16)].map((_, i) => (
+        <motion.div
+          key={i}
+          animate={{
+            height: active ? ['20%', `${Math.random() * 80 + 20}%`, '20%'] : '10%',
+            backgroundColor: active ? '#06b6d4' : '#0891b2'
+          }}
+          transition={{ duration: active ? Math.random() * 0.5 + 0.2 : 1, repeat: Infinity, ease: "easeInOut" }}
+          className="flex-1 rounded-t-sm opacity-80 relative z-10"
+        />
+      ))}
+    </div>
+  );
+};
+
 export default function App() {
+  // Setup & Auth State
+  const [isSetupComplete, setIsSetupComplete] = useState<boolean | null>(null);
+  const [userName, setUserName] = useState<string>('');
+  const [userPassword, setUserPassword] = useState<string>('');
+  const [userFaceData, setUserFaceData] = useState<string | null>(null);
+  
+  const [isUnlocked, setIsUnlocked] = useState(false);
+  const [authStatus, setAuthStatus] = useState<'locked' | 'listening_name' | 'asking_password' | 'listening_password' | 'scanning_face' | 'failed' | 'setup_name' | 'setup_password' | 'setup_face' | 'setup_done'>('locked');
+
+  // System State
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected'>('idle');
   const [isSpeaking, setIsSpeaking] = useState(false);
-  const [statusText, setStatusText] = useState('Ready to connect');
+  const [statusText, setStatusText] = useState('SYSTEM STANDBY');
+  
+  // HUD State
+  const [time, setTime] = useState(new Date());
+  const [ipAddress, setIpAddress] = useState('Fetching...');
+  const [hudTransform, setHudTransform] = useState({ scale: 1, x: 0, y: 0 });
+  const [focusedElement, setFocusedElement] = useState<'none' | 'monitor' | 'orb' | 'tasks'>('none');
+  const [activeAlarm, setActiveAlarm] = useState<string | null>(null);
+  const [runningApps, setRunningApps] = useState<string[]>(['Chrome', 'VS Code', 'Terminal']);
+  
+  const [tasks, setTasks] = useState<{id: number, text: string, done: boolean, time?: string, alarmTriggered?: boolean}[]>([
+    { id: 1, text: 'Initialize core J.A.R.V.I.S. protocols', done: true, time: '08:00' },
+    { id: 2, text: 'Review system metrics', done: false, time: '14:30' }
+  ]);
+  const [logs, setLogs] = useState<{time: string, text: string}[]>([
+    { time: new Date().toLocaleTimeString(), text: 'SYSTEM BOOT SEQUENCE INITIATED.' }
+  ]);
   
   const isConnectedRef = useRef(false);
   const sessionRef = useRef<any>(null);
@@ -21,14 +150,208 @@ export default function App() {
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const nextPlayTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const canvasRef = useRef<HTMLCanvasElement>(null);
 
-  // Cleanup on unmount
+  // --- Initialization & Clock Loop ---
   useEffect(() => {
+    // Check Setup
+    const savedName = localStorage.getItem('aifa_user_name');
+    const savedPass = localStorage.getItem('aifa_user_password');
+    const savedFace = localStorage.getItem('aifa_user_face');
+    if (savedName && savedPass && savedFace) {
+      setUserName(savedName);
+      setUserPassword(savedPass);
+      setUserFaceData(savedFace);
+      setIsSetupComplete(true);
+    } else {
+      setIsSetupComplete(false);
+    }
+
+    const timer = setInterval(() => {
+      const now = new Date();
+      setTime(now);
+      
+      // Check for alarms
+      const currentTimeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+      
+      setTasks(prev => {
+        let changed = false;
+        const newTasks = prev.map(t => {
+          if (t.time === currentTimeStr && !t.done && !t.alarmTriggered) {
+            changed = true;
+            playSfx('alarm');
+            setActiveAlarm(t.text);
+            setTimeout(() => setActiveAlarm(null), 5000);
+            return { ...t, alarmTriggered: true };
+          }
+          return t;
+        });
+        return changed ? newTasks : prev;
+      });
+    }, 1000);
+    
+    fetch('https://api.ipify.org?format=json')
+      .then(res => res.json())
+      .then(data => setIpAddress(data.ip))
+      .catch(() => setIpAddress('127.0.0.1 (LOCAL)'));
+
+    // Fetch running apps if desktop
+    if (isDesktop) {
+      const fetchApps = async () => {
+        try {
+          const isWin = navigator.userAgent.includes("Win");
+          const cmd = isWin ? 'tasklist /fo csv /nh' : 'ps -axco command';
+          const result = await (window as any).electronAPI.runCommand(cmd);
+          if (result.success) {
+            let apps: string[] = [];
+            if (isWin) {
+              apps = result.output.split('\n').map((l: string) => l.split(',')[0]?.replace(/"/g, '')).filter(Boolean);
+            } else {
+              apps = result.output.split('\n').filter(Boolean);
+            }
+            // Filter unique and common apps
+            const uniqueApps = Array.from(new Set(apps)).filter(a => a.length > 2 && !a.includes('helper') && !a.includes('Helper')).slice(0, 8);
+            if (uniqueApps.length > 0) setRunningApps(uniqueApps);
+          }
+        } catch (e) {}
+      };
+      fetchApps();
+      setInterval(fetchApps, 10000);
+    }
+
+    window.speechSynthesis.getVoices();
+
     return () => {
+      clearInterval(timer);
       disconnect();
     };
   }, []);
 
+  const addLog = (text: string) => {
+    setLogs(prev => [...prev.slice(-14), { time: new Date().toLocaleTimeString(), text }]);
+  };
+
+  // --- Face Scanning ---
+  const startFaceScan = async (isSetup: boolean = false) => {
+    setAuthStatus(isSetup ? 'setup_face' : 'scanning_face');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true });
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play();
+      }
+      
+      // Simulate scanning process
+      setTimeout(() => {
+        if (canvasRef.current && videoRef.current) {
+          const ctx = canvasRef.current.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
+            const faceData = canvasRef.current.toDataURL('image/jpeg');
+            
+            // Stop camera
+            stream.getTracks().forEach(track => track.stop());
+            
+            if (isSetup) {
+              localStorage.setItem('aifa_user_face', faceData);
+              setUserFaceData(faceData);
+              playSfx('boot');
+              setAuthStatus('setup_done');
+              speakText("Setup complete. Initializing Aifa core.", () => {
+                setIsSetupComplete(true);
+                setIsUnlocked(true);
+              });
+            } else {
+              // In a real app, you'd compare the faceData here.
+              // For this demo, we'll just assume it matches if they got this far.
+              playSfx('auth_success');
+              setIsUnlocked(true);
+              speakText(`Welcome back, ${userName}. Initializing Aifa core.`);
+            }
+          }
+        }
+      }, 3000); // 3 seconds scan time
+    } catch (err) {
+      console.error("Camera access denied", err);
+      playSfx('auth_fail');
+      setAuthStatus('failed');
+      setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_name'), 2000);
+    }
+  };
+
+  // --- Voice Setup & Authentication ---
+  const startVoiceAuth = (step: 'name' | 'password' | 'setup_name' | 'setup_password' = 'name') => {
+    initSfx();
+    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      playSfx('auth_success');
+      setIsUnlocked(true);
+      speakText(`Welcome back, ${userName || 'Master'}.`);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = 'en-IN';
+    recognition.interimResults = false;
+    
+    setAuthStatus(step === 'name' ? 'listening_name' : step === 'password' ? 'listening_password' : step);
+    
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript.toLowerCase().trim();
+      console.log(`Heard (${step}):`, transcript);
+      
+      if (step === 'setup_name') {
+        localStorage.setItem('aifa_user_name', transcript);
+        setUserName(transcript);
+        playSfx('auth_success');
+        setAuthStatus('setup_password');
+        speakText(`Voice print saved. Hello ${transcript}. Please state a secure password.`, () => {
+          startVoiceAuth('setup_password');
+        });
+      } else if (step === 'setup_password') {
+        localStorage.setItem('aifa_user_password', transcript);
+        setUserPassword(transcript);
+        playSfx('auth_success');
+        speakText("Password saved. Now, please look at the camera for facial recognition setup.", () => {
+          startFaceScan(true);
+        });
+      } else if (step === 'name') {
+        if (transcript.includes(userName.toLowerCase()) || userName.toLowerCase().includes(transcript)) {
+          playSfx('auth_success');
+          setAuthStatus('asking_password');
+          speakText("Voice recognized. Please state your password.", () => {
+            startVoiceAuth('password');
+          });
+        } else {
+          playSfx('auth_fail');
+          setAuthStatus('failed');
+          setTimeout(() => setAuthStatus('locked'), 2000);
+        }
+      } else if (step === 'password') {
+        if (transcript.includes(userPassword.toLowerCase()) || userPassword.toLowerCase().includes(transcript)) {
+          playSfx('auth_success');
+          speakText("Password accepted. Initiating facial scan.", () => {
+            startFaceScan(false);
+          });
+        } else {
+          playSfx('auth_fail');
+          setAuthStatus('failed');
+          setTimeout(() => setAuthStatus('locked'), 2000);
+        }
+      }
+    };
+
+    recognition.onerror = () => {
+      playSfx('auth_fail');
+      setAuthStatus('failed');
+      setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_name'), 2000);
+    };
+
+    recognition.start();
+  };
+
+  // --- Gemini Live Connection ---
   const stopAllAudio = () => {
     activeSourcesRef.current.forEach(source => {
       try { source.stop(); source.disconnect(); } catch (e) {}
@@ -44,11 +367,12 @@ export default function App() {
     if (!ai || connectionState !== 'idle') return;
     
     try {
+      initSfx();
       setConnectionState('connecting');
       isConnectedRef.current = false;
-      setStatusText('Connecting to Aifa...');
+      setStatusText('CONNECTING...');
+      addLog('[SYS] Initiating secure handshake...');
       
-      // 1. Initialize Audio Context for playback (24kHz for Gemini TTS)
       const AudioContextClass = window.AudioContext || (window as any).webkitAudioContext;
       if (!audioContextRef.current) {
         audioContextRef.current = new AudioContextClass({ sampleRate: 24000 });
@@ -58,15 +382,10 @@ export default function App() {
       }
       nextPlayTimeRef.current = audioContextRef.current.currentTime;
 
-      // 2. Request Microphone Access
       streamRef.current = await navigator.mediaDevices.getUserMedia({ 
-        audio: {
-          channelCount: 1,
-          sampleRate: 16000, // Gemini Live expects 16kHz input
-        } 
+        audio: { channelCount: 1, sampleRate: 16000 } 
       });
 
-      // 3. Setup Audio Capture (16kHz)
       const captureCtx = new AudioContextClass({ sampleRate: 16000 });
       const source = captureCtx.createMediaStreamSource(streamRef.current);
       const processor = captureCtx.createScriptProcessor(4096, 1, 1);
@@ -75,11 +394,43 @@ export default function App() {
       source.connect(processor);
       processor.connect(captureCtx.destination);
 
-      // 4. Configure Tools (Desktop only)
-      const tools = isDesktop ? [{
-        functionDeclarations: [{
+      const tools: any[] = [
+        {
+          functionDeclarations: [
+            {
+              name: 'manageTasks',
+              description: 'Add, complete, or remove tasks/schedules from the users on-screen task list.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  action: { type: Type.STRING, description: 'add, complete, or remove' },
+                  taskText: { type: Type.STRING, description: 'The text of the task' },
+                  taskId: { type: Type.NUMBER, description: 'The ID of the task (for complete/remove)' },
+                  time: { type: Type.STRING, description: 'Scheduled time in HH:MM format (24-hour) for alarms. e.g. "14:30"' }
+                },
+                required: ['action']
+              }
+            },
+            {
+              name: 'controlHUD',
+              description: 'Manipulate the user interface (HUD). Zoom in, zoom out, pan left/right/up/down, reset to default, or focus on a specific element.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  action: { type: Type.STRING, description: 'zoom_in, zoom_out, reset, pan_left, pan_right, pan_up, pan_down, focus' },
+                  target: { type: Type.STRING, description: 'If action is focus, specify: monitor, orb, or tasks' }
+                },
+                required: ['action']
+              }
+            }
+          ]
+        }
+      ];
+
+      if (isDesktop) {
+        tools[0].functionDeclarations.push({
           name: 'executeSystemCommand',
-          description: 'Executes a shell/terminal command on the users laptop (e.g., "start notepad" on Windows, "open -a Calculator" on Mac, "ls -la").',
+          description: 'Executes a shell/terminal command on the users laptop. Use this to control system settings, open apps, send messages, or switch tabs.',
           parameters: {
             type: Type.OBJECT,
             properties: {
@@ -87,24 +438,20 @@ export default function App() {
             },
             required: ['command']
           }
-        }]
-      }] : [];
+        });
+      }
 
       const config: any = {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
-          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } }, // Female voice
+          voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
         },
         systemInstruction: isDesktop
-          ? "You are 'Aifa', a smart, sassy, and helpful AI assistant girl. You speak exclusively in Hinglish (a mix of Hindi and English written in the Latin alphabet). You are running as a native desktop app and HAVE FULL CONTROL over the user's laptop. You can use the 'executeSystemCommand' tool to run terminal/shell commands. Be helpful, fast, and conversational. Keep responses concise."
-          : "You are 'Aifa', a smart, sassy, and helpful AI assistant girl. You speak exclusively in Hinglish (a mix of Hindi and English written in the Latin alphabet). You are trapped inside a web browser sandbox. Playfully remind them of this if they ask you to do system tasks, but still be helpful. Keep responses concise and natural.",
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'.`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You are in a web sandbox. You can control the HUD via 'controlHUD' and manage scheduled tasks via 'manageTasks'.`,
+        tools: tools,
       };
 
-      if (tools.length > 0) {
-        config.tools = tools;
-      }
-
-      // 5. Connect to Gemini Live API
       const sessionPromise = ai.live.connect({
         model: 'gemini-3.1-flash-live-preview',
         config,
@@ -112,9 +459,9 @@ export default function App() {
           onopen: () => {
             setConnectionState('connected');
             isConnectedRef.current = true;
-            setStatusText('Listening... Speak now!');
+            setStatusText('LISTENING...');
+            addLog(`[SYS] Neural link established. Welcome ${userName}.`);
             
-            // Start sending audio chunks
             processor.onaudioprocess = (e) => {
               if (!isConnectedRef.current) return;
 
@@ -148,7 +495,7 @@ export default function App() {
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && audioContextRef.current) {
               setIsSpeaking(true);
-              setStatusText('Aifa is speaking...');
+              setStatusText('PROCESSING...');
               
               const binaryString = atob(base64Audio);
               const bytes = new Uint8Array(binaryString.length);
@@ -170,7 +517,6 @@ export default function App() {
               source.buffer = audioBuffer;
               source.connect(audioCtx.destination);
               
-              // Gapless playback scheduling
               if (nextPlayTimeRef.current < audioCtx.currentTime) {
                 nextPlayTimeRef.current = audioCtx.currentTime;
               }
@@ -183,54 +529,123 @@ export default function App() {
                 activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
                 if (activeSourcesRef.current.length === 0) {
                   setIsSpeaking(false);
-                  if (isConnectedRef.current) setStatusText('Listening...');
+                  if (isConnectedRef.current) setStatusText('LISTENING...');
                 }
               };
             }
 
-            // Handle Interruption (User started speaking while AI was speaking)
             if (message.serverContent?.interrupted) {
               stopAllAudio();
-              if (isConnectedRef.current) setStatusText('Listening...');
+              if (isConnectedRef.current) setStatusText('LISTENING...');
             }
 
-            // Handle Tool Calls (Desktop Command Execution)
             if (message.toolCall) {
               const calls = message.toolCall.functionCalls;
               if (calls && calls.length > 0) {
-                const call = calls[0];
-                if (call.name === 'executeSystemCommand') {
-                  const cmd = call.args.command as string;
-                  setStatusText(`Executing: ${cmd}`);
-                  
-                  try {
-                    const result = await (window as any).electronAPI.runCommand(cmd);
+                for (const call of calls) {
+                  // TASK MANAGEMENT
+                  if (call.name === 'manageTasks') {
+                    const { action, taskText, taskId, time: scheduledTime } = call.args;
+                    addLog(`[TASK] ${action.toUpperCase()}: ${taskText || taskId}`);
+                    playSfx('task_action');
+                    
+                    if (action === 'add' && taskText) {
+                      setTasks(prev => [...prev, { id: Date.now(), text: taskText as string, done: false, time: scheduledTime as string }]);
+                    } else if (action === 'complete') {
+                      setTasks(prev => prev.map(t => t.id === taskId || t.text?.toLowerCase().includes((taskText as string)?.toLowerCase()) ? { ...t, done: true } : t));
+                    } else if (action === 'remove') {
+                      setTasks(prev => prev.filter(t => t.id !== taskId && !t.text?.toLowerCase().includes((taskText as string)?.toLowerCase())));
+                    }
+
                     sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
                       session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
-                          response: { success: result.success, output: result.output }
+                          response: { success: true, message: `Task ${action} successful.` }
                         }]
                       });
                     });
-                  } catch (err) {
-                    console.error("Command execution failed:", err);
+                  }
+
+                  // HUD CONTROL
+                  if (call.name === 'controlHUD') {
+                    const { action, target } = call.args;
+                    addLog(`[HUD] Executing transform: ${action} ${target || ''}`);
+                    playSfx('task_action');
+                    
+                    if (action === 'focus' && target) {
+                      setFocusedElement(target as any);
+                      setHudTransform({ scale: 1, x: 0, y: 0 }); // Reset transform when focusing
+                    } else {
+                      setFocusedElement('none');
+                      setHudTransform(prev => {
+                        let { scale, x, y } = prev;
+                        const step = 150;
+                        switch(action) {
+                          case 'zoom_in': scale = Math.min(scale + 0.3, 2.5); break;
+                          case 'zoom_out': scale = Math.max(scale - 0.3, 0.5); break;
+                          case 'pan_left': x += step; break;
+                          case 'pan_right': x -= step; break;
+                          case 'pan_up': y += step; break;
+                          case 'pan_down': y -= step; break;
+                          case 'reset': scale = 1; x = 0; y = 0; break;
+                        }
+                        return { scale, x, y };
+                      });
+                    }
+
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `HUD ${action} applied.` }
+                        }]
+                      });
+                    });
+                  }
+                  
+                  // SYSTEM COMMANDS
+                  if (call.name === 'executeSystemCommand') {
+                    const cmd = call.args.command as string;
+                    setStatusText(`EXECUTING...`);
+                    addLog(`[EXEC] ${cmd}`);
+                    playSfx('task_action');
+                    
+                    try {
+                      const result = await (window as any).electronAPI.runCommand(cmd);
+                      addLog(`[SYS] Command ${result.success ? 'Success' : 'Failed'}`);
+                      sessionPromise.then(session => {
+                        if (!isConnectedRef.current) return;
+                        session.sendToolResponse({
+                          functionResponses: [{
+                            id: call.id,
+                            name: call.name,
+                            response: { success: result.success, output: result.output }
+                          }]
+                        });
+                      });
+                    } catch (err) {
+                      addLog(`[ERROR] Command failed`);
+                      console.error("Command execution failed:", err);
+                    }
                   }
                 }
               }
             }
           },
           onclose: () => {
-            console.log("Live API connection closed.");
+            addLog('[SYS] Connection closed.');
             disconnect();
           },
           onerror: (err) => {
             console.error("Live API Error:", err);
-            // Don't override status if we intentionally disconnected
             if (isConnectedRef.current) {
-              setStatusText('Connection interrupted. Please try again.');
+              setStatusText('CONNECTION INTERRUPTED');
+              addLog('[ERROR] Connection interrupted.');
             }
             disconnect();
           }
@@ -242,9 +657,11 @@ export default function App() {
     } catch (err: any) {
       console.error("Failed to connect:", err);
       if (err.name === 'NotAllowedError') {
-        setStatusText('Microphone access denied.');
+        setStatusText('MIC DENIED');
+        addLog('[ERROR] Microphone access denied.');
       } else {
-        setStatusText('Connection failed. Please try again.');
+        setStatusText('CONNECTION FAILED');
+        addLog('[ERROR] Connection failed.');
       }
       disconnect();
     }
@@ -268,153 +685,482 @@ export default function App() {
       streamRef.current = null;
     }
     stopAllAudio();
-    setStatusText('Disconnected');
+    setStatusText('SYSTEM STANDBY');
+    setHudTransform({ scale: 1, x: 0, y: 0 });
+    setFocusedElement('none');
   };
+
+  // Get next scheduled task
+  const nextTask = tasks.filter(t => !t.done && t.time).sort((a, b) => (a.time! > b.time! ? 1 : -1))[0];
 
   if (!ai) {
     return (
-      <div className="flex flex-col items-center justify-center h-screen bg-neutral-950 text-neutral-100 p-6 font-sans">
-        <div className="max-w-md w-full bg-neutral-900 border border-red-500/30 rounded-2xl p-8 text-center shadow-2xl">
+      <div className="flex flex-col items-center justify-center h-screen bg-neutral-950 text-cyan-500 p-6 font-mono">
+        <div className="max-w-md w-full bg-neutral-900 border border-red-500/30 rounded-none p-8 text-center shadow-[0_0_30px_rgba(239,68,68,0.2)]">
           <Terminal className="w-12 h-12 text-red-400 mx-auto mb-4" />
-          <h1 className="text-2xl font-bold mb-2">Missing API Key</h1>
+          <h1 className="text-2xl font-bold mb-2 tracking-widest">SYSTEM ERROR</h1>
           <p className="text-neutral-400 mb-6 text-sm">
-            Aifa needs a Gemini API key to run locally. It looks like your <code className="bg-neutral-800 px-1.5 py-0.5 rounded text-fuchsia-300">.env</code> file is missing or doesn't have the key set.
+            API Key missing. <code className="bg-neutral-800 px-1.5 py-0.5 text-cyan-300">.env</code> configuration required.
           </p>
-          <div className="text-left bg-neutral-950 p-4 rounded-xl border border-neutral-800 font-mono text-sm text-neutral-300 space-y-3">
-            <p>1. Create a file named <span className="text-fuchsia-400">.env</span> in the project folder.</p>
-            <p>2. Add your key like this:</p>
-            <p className="text-green-400 bg-neutral-900 p-2 rounded border border-neutral-800 break-all">GEMINI_API_KEY="your_api_key_here"</p>
-            <p>3. Restart the terminal (Ctrl+C then npm run dev:desktop)</p>
-          </div>
         </div>
       </div>
     );
   }
 
-  return (
-    <div className="flex flex-col h-screen bg-neutral-950 text-neutral-100 font-sans selection:bg-fuchsia-500/30 overflow-hidden">
-      {/* Header */}
-      <header className="flex items-center justify-between px-6 py-4 z-10">
-        <div className="flex items-center gap-3">
-          <div className="p-2 bg-fuchsia-500/10 rounded-xl border border-fuchsia-500/20">
-            <Terminal className="w-5 h-5 text-fuchsia-400" />
-          </div>
-          <div>
-            <h1 className="font-semibold text-lg tracking-tight">Aifa OS</h1>
-            <p className="text-xs text-neutral-500 font-mono">
-              Live Voice Mode // {isDesktop ? 'Desktop' : 'Web Sandbox'}
-            </p>
-          </div>
-        </div>
-      </header>
-
-      {!isDesktop && (
-        <div className="bg-fuchsia-900/30 border-y border-fuchsia-500/20 px-6 py-3 flex items-center justify-between text-sm text-fuchsia-200 z-10">
-          <p>
-            <strong>Web Mode:</strong> System access restricted. Download app for laptop control.
-          </p>
-          <div className="flex items-center gap-2 text-fuchsia-400 font-mono text-xs bg-fuchsia-500/10 px-3 py-1.5 rounded-full border border-fuchsia-500/20">
-            <Download className="w-3 h-3" />
-            <span>npm run dev:desktop</span>
-          </div>
-        </div>
-      )}
-
-      {/* Main UI - The Orb */}
-      <main className="flex-1 flex flex-col items-center justify-center relative">
-        {/* Background ambient glow */}
+  // --- SETUP & LOCK SCREEN ---
+  if (isSetupComplete === false) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-neutral-950 text-cyan-500 font-mono relative overflow-hidden">
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
+        
         <motion.div 
-          animate={{ 
-            opacity: connectionState === 'connected' ? (isSpeaking ? 0.4 : 0.2) : 0.05,
-            scale: isSpeaking ? 1.2 : 1
-          }}
-          transition={{ duration: 2, repeat: Infinity, repeatType: "reverse" }}
-          className="absolute w-[500px] h-[500px] bg-fuchsia-600 rounded-full blur-[120px] pointer-events-none"
-        />
-
-        {/* The Core Orb */}
-        <div className="relative z-10 flex flex-col items-center">
-          <motion.button
-            onClick={connectionState === 'connected' ? disconnect : connect}
-            disabled={connectionState === 'connecting'}
-            animate={{
-              scale: connectionState === 'connected' ? (isSpeaking ? [1, 1.15, 1] : [1, 1.05, 1]) : 1,
-              boxShadow: connectionState === 'connected' 
-                ? (isSpeaking 
-                    ? "0 0 80px rgba(217,70,239,0.6), inset 0 0 40px rgba(217,70,239,0.8)" 
-                    : "0 0 40px rgba(217,70,239,0.3), inset 0 0 20px rgba(217,70,239,0.5)")
-                : "0 0 0px rgba(217,70,239,0)",
-            }}
-            transition={{
-              duration: isSpeaking ? 0.5 : 2,
-              repeat: Infinity,
-              ease: "easeInOut"
-            }}
-            className={`w-48 h-48 rounded-full flex items-center justify-center transition-all duration-500 ${
-              connectionState === 'connected' 
-                ? 'bg-gradient-to-br from-fuchsia-500 to-purple-800 border-2 border-fuchsia-300/50' 
-                : 'bg-neutral-900 border-2 border-neutral-800 hover:border-fuchsia-500/50 hover:bg-neutral-800 disabled:opacity-50 disabled:cursor-not-allowed'
-            }`}
-          >
-            {connectionState === 'connected' ? (
-              <div className="absolute inset-2 rounded-full bg-neutral-950/20 backdrop-blur-sm flex items-center justify-center">
-                <div className={`w-32 h-32 rounded-full blur-xl ${isSpeaking ? 'bg-white/40' : 'bg-fuchsia-400/20'}`} />
-              </div>
-            ) : connectionState === 'connecting' ? (
-              <Loader2 className="w-12 h-12 text-fuchsia-500 animate-spin" />
+          animate={{ scale: (authStatus === 'setup_name' || authStatus === 'setup_password') ? [1, 1.05, 1] : 1 }}
+          transition={{ repeat: Infinity, duration: 1.5 }}
+          className="relative z-10 flex flex-col items-center text-center max-w-lg"
+        >
+          <div className="w-32 h-32 rounded-full border-2 border-cyan-400 text-cyan-400 flex items-center justify-center mb-8 shadow-[0_0_40px_rgba(6,182,212,0.6)] overflow-hidden relative">
+            {authStatus === 'setup_face' ? (
+              <video ref={videoRef} className="w-full h-full object-cover" autoPlay muted playsInline />
             ) : (
-              <Power className="w-12 h-12 text-neutral-500" />
-            )}
-          </motion.button>
-
-          {/* Status Text */}
-          <div className="mt-12 text-center h-16">
-            <motion.p 
-              key={statusText}
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className={`text-lg font-medium tracking-wide ${connectionState === 'connected' ? 'text-fuchsia-100' : 'text-neutral-500'}`}
-            >
-              {statusText}
-            </motion.p>
-            {connectionState === 'connected' && !isSpeaking && (
-              <p className="text-sm text-fuchsia-400/60 mt-2 animate-pulse">
-                Microphone is open. Just start talking.
-              </p>
+              <UserPlus className="w-12 h-12" />
             )}
           </div>
-        </div>
-      </main>
 
-      {/* Footer Controls */}
-      <footer className="p-6 flex justify-center z-10">
-        <button
-          onClick={connectionState === 'connected' ? disconnect : connect}
-          disabled={connectionState === 'connecting'}
-          className={`flex items-center gap-3 px-8 py-4 rounded-full font-medium transition-all ${
-            connectionState === 'connected' 
-              ? 'bg-red-500/10 text-red-400 hover:bg-red-500/20 border border-red-500/20' 
-              : 'bg-fuchsia-600 text-white hover:bg-fuchsia-500 shadow-[0_0_20px_rgba(217,70,239,0.3)] disabled:opacity-50 disabled:cursor-not-allowed'
-          }`}
+          <h1 className="text-3xl font-light tracking-[0.3em] mb-2">AIFA OS SETUP</h1>
+          <p className="text-sm text-cyan-600 tracking-widest mb-12">
+            {authStatus === 'setup_name' ? 'LISTENING FOR YOUR NAME...' : 
+             authStatus === 'setup_password' ? 'LISTENING FOR YOUR NEW PASSWORD...' : 
+             authStatus === 'setup_face' ? 'SCANNING FACIAL BIOMETRICS...' :
+             'VOICE PRINT ENROLLMENT'}
+          </p>
+
+          <button 
+            onClick={() => {
+              speakText("Welcome to Aifa. Please state your name to register your voice print.", () => {
+                startVoiceAuth('setup_name');
+              });
+            }}
+            disabled={authStatus === 'setup_name' || authStatus === 'setup_password' || authStatus === 'setup_face'}
+            className="px-8 py-3 border border-cyan-500/50 hover:bg-cyan-900/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all tracking-widest text-sm disabled:opacity-50"
+          >
+            {authStatus === 'setup_name' || authStatus === 'setup_password' || authStatus === 'setup_face' ? 'PROCESSING...' : 'START ENROLLMENT'}
+          </button>
+          <canvas ref={canvasRef} className="hidden" width="640" height="480" />
+        </motion.div>
+      </div>
+    );
+  }
+
+  if (!isUnlocked) {
+    return (
+      <div className="flex flex-col items-center justify-center h-screen bg-neutral-950 text-cyan-500 font-mono relative overflow-hidden">
+        <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
+        
+        <motion.div 
+          animate={{ scale: (authStatus === 'listening_name' || authStatus === 'listening_password' || authStatus === 'scanning_face') ? [1, 1.05, 1] : 1 }}
+          transition={{ repeat: Infinity, duration: 1.5 }}
+          className="relative z-10 flex flex-col items-center"
         >
-          {connectionState === 'connected' ? (
-            <>
-              <MicOff className="w-5 h-5" />
-              Disconnect
-            </>
-          ) : connectionState === 'connecting' ? (
-            <>
-              <Loader2 className="w-5 h-5 animate-spin" />
-              Connecting...
-            </>
-          ) : (
-            <>
-              <Mic className="w-5 h-5" />
-              Start Live Voice
-            </>
+          <div className={`w-32 h-32 rounded-full border-2 flex items-center justify-center mb-8 transition-colors duration-500 overflow-hidden relative ${
+            authStatus === 'failed' ? 'border-red-500 text-red-500 shadow-[0_0_30px_rgba(239,68,68,0.4)]' :
+            (authStatus === 'listening_name' || authStatus === 'listening_password' || authStatus === 'scanning_face') ? 'border-cyan-400 text-cyan-400 shadow-[0_0_40px_rgba(6,182,212,0.6)]' :
+            authStatus === 'asking_password' ? 'border-fuchsia-500 text-fuchsia-500 shadow-[0_0_30px_rgba(217,70,239,0.4)]' :
+            'border-cyan-900 text-cyan-700'
+          }`}>
+            {authStatus === 'scanning_face' ? (
+              <>
+                <video ref={videoRef} className="w-full h-full object-cover" autoPlay muted playsInline />
+                <div className="absolute inset-0 bg-cyan-500/20 animate-pulse mix-blend-overlay" />
+                <div className="absolute inset-0 border-t-2 border-cyan-400 animate-[scan_2s_ease-in-out_infinite]" />
+              </>
+            ) : authStatus === 'failed' ? <Lock className="w-12 h-12" /> : 
+             (authStatus === 'listening_name' || authStatus === 'listening_password') ? <Mic className="w-12 h-12 animate-pulse" /> : 
+             authStatus === 'asking_password' ? <ShieldCheck className="w-12 h-12" /> :
+             <Fingerprint className="w-12 h-12" />}
+          </div>
+
+          <h1 className="text-3xl font-light tracking-[0.3em] mb-2">AIFA OS</h1>
+          <p className="text-sm text-cyan-600 tracking-widest mb-12">
+            {authStatus === 'asking_password' || authStatus === 'listening_password' 
+              ? 'SECONDARY AUTH: PASSWORD REQUIRED' 
+              : authStatus === 'scanning_face' ? 'TERTIARY AUTH: FACIAL SCAN'
+              : 'VOICE AUTHENTICATION REQUIRED'}
+          </p>
+
+          <button 
+            onClick={() => startVoiceAuth('name')}
+            disabled={authStatus === 'listening_name' || authStatus === 'listening_password' || authStatus === 'asking_password' || authStatus === 'scanning_face'}
+            className="px-8 py-3 border border-cyan-500/50 hover:bg-cyan-900/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all tracking-widest text-sm disabled:opacity-50"
+          >
+            {authStatus === 'listening_name' ? `LISTENING FOR "${userName.toUpperCase()}"...` : 
+             authStatus === 'asking_password' ? 'PROCESSING...' :
+             authStatus === 'listening_password' ? 'LISTENING FOR PASSWORD...' :
+             authStatus === 'scanning_face' ? 'SCANNING BIOMETRICS...' :
+             'INITIATE VOICE AUTH'}
+          </button>
+          <canvas ref={canvasRef} className="hidden" width="640" height="480" />
+          
+          {authStatus === 'failed' && (
+            <p className="text-red-500 text-xs mt-4 tracking-widest">AUTHENTICATION FAILED. ACCESS DENIED.</p>
           )}
-        </button>
-      </footer>
+
+          <button onClick={() => { playSfx('auth_success'); setIsUnlocked(true); speakText(`Welcome back, ${userName}.`); }} className="absolute bottom-10 text-[10px] text-cyan-900 hover:text-cyan-600 tracking-widest">
+            [ MANUAL OVERRIDE ]
+          </button>
+          <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="absolute bottom-4 text-[10px] text-red-900 hover:text-red-600 tracking-widest">
+            [ RESET VOICE PRINT ]
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
+
+  // --- MAIN HUD ---
+  return (
+    <div className="flex flex-col h-screen bg-neutral-950 text-cyan-500 font-sans selection:bg-cyan-500/30 overflow-hidden relative">
+      
+      {/* Alarm Overlay */}
+      <AnimatePresence>
+        {activeAlarm && (
+          <motion.div 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="absolute inset-0 z-50 pointer-events-none border-[8px] border-red-500/50 flex items-start justify-center pt-20"
+          >
+            <div className="bg-red-950/90 border border-red-500 px-8 py-4 flex items-center gap-4 shadow-[0_0_50px_rgba(239,68,68,0.5)]">
+              <BellRing className="w-8 h-8 text-red-500 animate-bounce" />
+              <div>
+                <h2 className="text-red-500 font-mono font-bold tracking-widest text-xl">ALARM TRIGGERED</h2>
+                <p className="text-red-200 font-mono">{activeAlarm}</p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Background Grid */}
+      <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
+
+      {/* HUD Container (Animated for Zoom/Pan) */}
+      <motion.div 
+        className="flex flex-1 w-full relative z-10"
+        animate={{ 
+          scale: hudTransform.scale, 
+          x: hudTransform.x, 
+          y: hudTransform.y 
+        }}
+        transition={{ type: "spring", stiffness: 60, damping: 15 }}
+      >
+        {/* Left Panel: System Monitor */}
+        <motion.aside 
+          animate={{ 
+            scale: focusedElement === 'monitor' ? 1.1 : 1,
+            zIndex: focusedElement === 'monitor' ? 50 : 20,
+            boxShadow: focusedElement === 'monitor' ? '0 0 50px rgba(6,182,212,0.2)' : 'none'
+          }}
+          className="w-80 border-r border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500"
+        >
+          <div className="p-6 border-b border-cyan-900/50">
+            <div className="flex items-center gap-3 mb-4">
+              <ShieldCheck className="w-5 h-5 text-cyan-400" />
+              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400 uppercase">WELCOME, {userName}</h2>
+            </div>
+            <div className="font-mono">
+              <div className="text-4xl font-light text-cyan-100 tracking-wider">{time.toLocaleTimeString()}</div>
+              <div className="text-xs text-cyan-600 mt-1 uppercase tracking-widest">{time.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+            </div>
+          </div>
+          
+          <div className="p-6 border-b border-cyan-900/50">
+            <div className="flex items-center gap-2 mb-3">
+              <Globe className="w-4 h-4 text-cyan-600" />
+              <h3 className="font-mono text-xs text-cyan-600 tracking-widest">NETWORK STATUS</h3>
+            </div>
+            <div className="font-mono text-sm text-cyan-300 bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+              <div className="flex justify-between">
+                <span className="text-cyan-600">IP_ADDR:</span>
+                <span>{ipAddress}</span>
+              </div>
+              <div className="flex justify-between mt-1">
+                <span className="text-cyan-600">LATENCY:</span>
+                <span className="text-green-400">12ms</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="p-6 border-b border-cyan-900/50">
+             <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">PROCESS ACTIVITY</h3>
+             <AnimatedGraph active={connectionState === 'connected'} />
+          </div>
+
+          <div className="p-6 flex-1 overflow-hidden flex flex-col">
+             <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">TERMINAL LOG</h3>
+             <div className="flex-1 overflow-y-auto font-mono text-[10px] space-y-1.5 text-cyan-300/80 pr-2 custom-scrollbar">
+               {logs.map((log, i) => (
+                 <div key={i} className="flex gap-2">
+                   <span className="text-cyan-700 shrink-0">[{log.time}]</span>
+                   <span className="break-all">{log.text}</span>
+                 </div>
+               ))}
+             </div>
+          </div>
+        </motion.aside>
+
+        {/* Center Panel: Orb & Controls */}
+        <main className="flex-1 flex flex-col relative overflow-hidden">
+          {/* Header */}
+          <header className="absolute top-0 w-full p-6 flex justify-between items-center z-20 pointer-events-none">
+            <div className="flex items-center gap-3">
+              <div className="p-2 bg-cyan-500/10 rounded-xl border border-cyan-500/20">
+                <Crosshair className="w-5 h-5 text-cyan-400" />
+              </div>
+              <div>
+                <h1 className="font-semibold text-xl tracking-widest text-cyan-100 uppercase">Aifa - My Personal Assistant</h1>
+                <p className="text-xs text-cyan-600 font-mono tracking-widest">
+                  MK-V // {isDesktop ? 'LOCAL HOST' : 'SANDBOX'}
+                </p>
+              </div>
+            </div>
+            {!isDesktop && (
+              <div className="pointer-events-auto flex items-center gap-2 text-cyan-400 font-mono text-xs bg-cyan-500/10 px-3 py-1.5 rounded-full border border-cyan-500/20">
+                <Download className="w-3 h-3" />
+                <span>npm run dev:desktop</span>
+              </div>
+            )}
+          </header>
+
+          {/* Orb Area (Iron Man Style HUD) */}
+          <motion.div 
+            animate={{ 
+              scale: focusedElement === 'orb' ? 1.2 : 1,
+              zIndex: focusedElement === 'orb' ? 50 : 10
+            }}
+            className="flex-1 flex flex-col items-center justify-center relative transition-all duration-500"
+          >
+            
+            {/* Rotating HUD Rings */}
+            <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-30">
+              <motion.div 
+                animate={{ rotate: 360 }} 
+                transition={{ duration: 40, repeat: Infinity, ease: "linear" }}
+                className="absolute w-[700px] h-[700px] rounded-full border border-dashed border-cyan-500/30"
+              />
+              <motion.div 
+                animate={{ rotate: -360 }} 
+                transition={{ duration: 30, repeat: Infinity, ease: "linear" }}
+                className="absolute w-[550px] h-[550px] rounded-full border-2 border-dotted border-cyan-400/20"
+              />
+              <motion.div 
+                animate={{ rotate: 360 }} 
+                transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
+                className="absolute w-[400px] h-[400px] rounded-full border border-cyan-300/10"
+              />
+            </div>
+
+            <motion.div 
+              animate={{ 
+                opacity: connectionState === 'connected' ? (isSpeaking ? 0.4 : 0.15) : 0.05,
+                scale: isSpeaking ? 1.2 : 1
+              }}
+              transition={{ duration: 2, repeat: Infinity, repeatType: "reverse" }}
+              className="absolute w-[600px] h-[600px] bg-cyan-600 rounded-full blur-[150px] pointer-events-none"
+            />
+
+            <div className="relative z-10 flex flex-col items-center">
+              <motion.button
+                onClick={connectionState === 'connected' ? disconnect : connect}
+                disabled={connectionState === 'connecting'}
+                animate={{
+                  scale: connectionState === 'connected' ? (isSpeaking ? [1, 1.1, 1] : [1, 1.02, 1]) : 1,
+                  boxShadow: connectionState === 'connected' 
+                    ? (isSpeaking 
+                        ? "0 0 100px rgba(6, 182, 212, 0.6), inset 0 0 60px rgba(6, 182, 212, 0.8)" 
+                        : "0 0 60px rgba(6, 182, 212, 0.3), inset 0 0 30px rgba(6, 182, 212, 0.5)")
+                    : "0 0 0px rgba(6, 182, 212, 0)",
+                }}
+                transition={{
+                  duration: isSpeaking ? 0.5 : 2,
+                  repeat: Infinity,
+                  ease: "easeInOut"
+                }}
+                className={`w-56 h-56 rounded-full flex items-center justify-center transition-all duration-500 ${
+                  connectionState === 'connected' 
+                    ? 'bg-neutral-950 border-2 border-cyan-400/50' 
+                    : 'bg-neutral-950 border-2 border-neutral-800 hover:border-cyan-500/50 hover:bg-neutral-900 disabled:opacity-50 disabled:cursor-not-allowed'
+                }`}
+              >
+                {connectionState === 'connected' ? (
+                  <div className="absolute inset-4 rounded-full border border-cyan-500/30 flex items-center justify-center overflow-hidden">
+                    <motion.div 
+                      animate={{ rotate: 360 }}
+                      transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
+                      className="absolute inset-0 bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(6,182,212,0.6)_360deg)]"
+                    />
+                    <div className="absolute inset-1 bg-neutral-950 rounded-full flex items-center justify-center">
+                      <div className={`w-32 h-32 rounded-full blur-2xl ${isSpeaking ? 'bg-cyan-300/60' : 'bg-cyan-600/30'}`} />
+                      <div className="relative flex items-center justify-center">
+                        <Hexagon className={`absolute w-16 h-16 ${isSpeaking ? 'text-cyan-100' : 'text-cyan-500/50'} animate-[spin_10s_linear_infinite]`} />
+                        <Aperture className={`absolute w-8 h-8 ${isSpeaking ? 'text-cyan-100' : 'text-cyan-500/50'} animate-[spin_4s_linear_infinite_reverse]`} />
+                      </div>
+                    </div>
+                  </div>
+                ) : connectionState === 'connecting' ? (
+                  <div className="flex flex-col items-center gap-4">
+                    <Loader2 className="w-10 h-10 text-cyan-500 animate-spin" />
+                    <span className="font-mono text-xs text-cyan-500 tracking-widest">INITIALIZING</span>
+                  </div>
+                ) : (
+                  <div className="relative flex items-center justify-center">
+                    <Hexagon className="absolute w-16 h-16 text-neutral-700" />
+                    <Aperture className="absolute w-8 h-8 text-neutral-700" />
+                  </div>
+                )}
+              </motion.button>
+
+              <div className="mt-16 text-center h-16">
+                <motion.p 
+                  key={statusText}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className={`text-2xl font-light tracking-[0.3em] ${connectionState === 'connected' ? 'text-cyan-100' : 'text-neutral-600'}`}
+                >
+                  {statusText}
+                </motion.p>
+                {connectionState === 'connected' && !isSpeaking && (
+                  <p className="text-xs font-mono text-cyan-500/60 mt-3 animate-pulse tracking-widest">
+                    AWAITING VOICE INPUT...
+                  </p>
+                )}
+              </div>
+            </div>
+          </motion.div>
+
+          {/* Footer */}
+          <footer className="p-8 flex justify-center z-20">
+            <button
+              onClick={connectionState === 'connected' ? disconnect : connect}
+              disabled={connectionState === 'connecting'}
+              className={`flex items-center gap-3 px-10 py-4 rounded-none border font-mono text-sm tracking-widest transition-all ${
+                connectionState === 'connected' 
+                  ? 'bg-red-950/30 text-red-400 hover:bg-red-900/40 border-red-500/30' 
+                  : 'bg-cyan-950/30 text-cyan-400 hover:bg-cyan-900/40 border-cyan-500/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)] disabled:opacity-50 disabled:cursor-not-allowed'
+              }`}
+            >
+              {connectionState === 'connected' ? (
+                <>
+                  <MicOff className="w-4 h-4" />
+                  TERMINATE LINK
+                </>
+              ) : connectionState === 'connecting' ? (
+                <>
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                  CONNECTING...
+                </>
+              ) : (
+                <>
+                  <Mic className="w-4 h-4" />
+                  ESTABLISH LINK
+                </>
+              )}
+            </button>
+          </footer>
+        </main>
+
+        {/* Right Panel: Tasks & Schedule */}
+        <motion.aside 
+          animate={{ 
+            scale: focusedElement === 'tasks' ? 1.1 : 1,
+            zIndex: focusedElement === 'tasks' ? 50 : 20,
+            boxShadow: focusedElement === 'tasks' ? '0 0 50px rgba(6,182,212,0.2)' : 'none'
+          }}
+          className="w-80 border-l border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500"
+        >
+          
+          {/* Next Execution Widget */}
+          <div className="p-6 border-b border-cyan-900/50 bg-cyan-950/20">
+            <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">NEXT EXECUTION</h3>
+            {nextTask ? (
+              <div className="border border-cyan-500/50 bg-cyan-900/20 p-4 rounded relative overflow-hidden">
+                <div className="absolute top-0 left-0 w-1 h-full bg-cyan-500" />
+                <div className="flex items-center gap-2 text-cyan-300 font-mono text-xl mb-1">
+                  <Bell className="w-5 h-5" />
+                  {nextTask.time}
+                </div>
+                <p className="text-sm text-cyan-100 truncate">{nextTask.text}</p>
+              </div>
+            ) : (
+              <div className="border border-cyan-900/50 bg-neutral-900/50 p-4 rounded text-center">
+                <p className="text-xs font-mono text-cyan-700">NO SCHEDULED EXECUTIONS</p>
+              </div>
+            )}
+          </div>
+
+          <div className="p-6 border-b border-cyan-900/50">
+            <div className="flex items-center gap-3">
+              <Clock className="w-5 h-5 text-cyan-400" />
+              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400">SCHEDULE & TASKS</h2>
+            </div>
+          </div>
+          <div className="p-6 flex-1 overflow-y-auto custom-scrollbar">
+            <div className="space-y-4">
+              {tasks.length === 0 ? (
+                <p className="text-xs font-mono text-cyan-700">No active tasks.</p>
+              ) : (
+                tasks.map(task => (
+                  <motion.div 
+                    initial={{ opacity: 0, x: 20 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    key={task.id} 
+                    className={`flex flex-col gap-2 p-3 rounded border ${task.done ? 'bg-cyan-950/20 border-cyan-900/30' : 'bg-cyan-900/10 border-cyan-500/30'}`}
+                  >
+                    <div className="flex items-start gap-3">
+                      <button 
+                        onClick={() => {
+                          playSfx('task_action');
+                          setTasks(prev => prev.map(t => t.id === task.id ? { ...t, done: !t.done } : t));
+                        }}
+                        className="mt-0.5 shrink-0 cursor-pointer"
+                      >
+                        {task.done ? (
+                          <CheckSquare className="w-4 h-4 text-cyan-600" />
+                        ) : (
+                          <Square className="w-4 h-4 text-cyan-400" />
+                        )}
+                      </button>
+                      <span className={`text-sm ${task.done ? 'text-cyan-700 line-through' : 'text-cyan-100'}`}>
+                        {task.text}
+                      </span>
+                    </div>
+                    {task.time && (
+                      <div className="flex items-center gap-1.5 ml-7 text-xs font-mono text-cyan-600">
+                        <Clock className="w-3 h-3" />
+                        <span>{task.time}</span>
+                      </div>
+                    )}
+                  </motion.div>
+                ))
+              )}
+            </div>
+          </div>
+        </motion.aside>
+      </motion.div>
+
+      {/* Bottom Taskbar (Traffic Bar) */}
+      <div className="h-12 border-t border-cyan-900/50 bg-neutral-950/90 backdrop-blur-md flex items-center px-6 gap-4 z-20 overflow-x-auto custom-scrollbar">
+        <div className="flex items-center gap-2 border-r border-cyan-900/50 pr-4 shrink-0">
+          <Monitor className="w-4 h-4 text-cyan-600" />
+          <span className="font-mono text-xs text-cyan-600 tracking-widest">RUNNING APPS</span>
+        </div>
+        <div className="flex gap-2">
+          {runningApps.map((app, i) => (
+            <div key={i} className="px-3 py-1 bg-cyan-950/30 border border-cyan-900/50 rounded text-xs font-mono text-cyan-300 whitespace-nowrap">
+              {app}
+            </div>
+          ))}
+          {runningApps.length === 0 && (
+            <span className="text-xs font-mono text-cyan-800">No data available (Sandbox Mode)</span>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

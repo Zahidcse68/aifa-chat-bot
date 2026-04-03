@@ -2,6 +2,7 @@
   "name": "Aifa - Hinglish AI Assistant",
   "description": "A web-based AI assistant that speaks Hinglish with a female voice. Note: Browser sandboxing prevents actual laptop control.",
   "requestFramePermissions": [
-    "microphone"
+    "microphone",
+    "camera"
   ]
 }

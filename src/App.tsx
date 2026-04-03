@@ -1,5 +1,5 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
-import * as faceapi from 'face-api.js';
+import * as faceapi from '@vladmandic/face-api';
 import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Cloud, Crosshair, Download, Droplets, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, ShieldCheck, Square, Terminal, Thermometer, UserPlus, Wind } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
@@ -217,7 +217,7 @@ export default function App() {
   useEffect(() => {
     const loadModels = async () => {
       try {
-        const MODEL_URL = 'https://justadudewhohacks.github.io/face-api.js/models';
+        const MODEL_URL = 'https://vladmandic.github.io/face-api/model/';
         await Promise.all([
           faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
@@ -330,67 +330,84 @@ export default function App() {
       let scanCount = 0;
       const maxScans = isSetup ? 3 : 1; // 3 scans for setup, 1 for login
       const descriptors: Float32Array[] = [];
+      let isScanning = true;
+      let scanTimeout: any = null;
 
-      const scanInterval = setInterval(async () => {
+      const performScan = async () => {
+        if (!isScanning) return;
+        
         if (videoRef.current && videoRef.current.readyState === 4) {
-          const detection = await faceapi.detectSingleFace(videoRef.current).withFaceLandmarks().withFaceDescriptor();
-          
-          if (detection) {
-            descriptors.push(detection.descriptor);
-            scanCount++;
-            if (isSetup) {
-               speakText(`Face captured. ${3 - scanCount} remaining.`);
-            }
-          } else {
-             if (isSetup) speakText("No face detected. Please look at the camera.");
-          }
-
-          if (scanCount >= maxScans) {
-            clearInterval(scanInterval);
-            stream.getTracks().forEach(track => track.stop());
-
-            if (isSetup) {
-              // Save the first descriptor as an array
-              const descriptorArray = Array.from(descriptors[0]);
-              localStorage.setItem('aifa_user_face_descriptor', JSON.stringify(descriptorArray));
-              localStorage.setItem('aifa_user_face', 'enrolled');
-              setUserFaceData('enrolled');
-              playSfx('boot');
-              setAuthStatus('setup_done');
-              speakText("Setup complete. Login now with your face.", () => {
-                setIsSetupComplete(true);
-                setAuthStatus('locked');
-              });
-            } else {
-              const savedDescriptorStr = localStorage.getItem('aifa_user_face_descriptor');
-              if (savedDescriptorStr) {
-                const savedDescriptor = new Float32Array(JSON.parse(savedDescriptorStr));
-                const distance = faceapi.euclideanDistance(descriptors[0], savedDescriptor);
-                if (distance < 0.5) { // Threshold for match
-                  playSfx('auth_success');
-                  setIsUnlocked(true);
-                  speakText(`Welcome back, Master. Initializing Aifa core.`);
-                } else {
-                  playSfx('auth_fail');
-                  setAuthStatus('failed');
-                  speakText("Wrong face detected. Access denied.");
-                  setTimeout(() => setAuthStatus('locked'), 2000);
-                }
-              } else {
-                 playSfx('auth_fail');
-                 setAuthStatus('failed');
-                 speakText("No enrolled face found.");
-                 setTimeout(() => setAuthStatus('locked'), 2000);
+          try {
+            const detection = await faceapi.detectSingleFace(videoRef.current).withFaceLandmarks().withFaceDescriptor();
+            
+            if (detection) {
+              descriptors.push(detection.descriptor);
+              scanCount++;
+              if (isSetup && scanCount < maxScans) {
+                 speakText(`Face captured. ${maxScans - scanCount} remaining.`);
               }
+            } else {
+               if (isSetup) speakText("No face detected. Please look at the camera.");
             }
+
+            if (scanCount >= maxScans) {
+              isScanning = false;
+              stream.getTracks().forEach(track => track.stop());
+
+              if (isSetup) {
+                // Save the first descriptor as an array
+                const descriptorArray = Array.from(descriptors[0]);
+                localStorage.setItem('aifa_user_face_descriptor', JSON.stringify(descriptorArray));
+                localStorage.setItem('aifa_user_face', 'enrolled');
+                setUserFaceData('enrolled');
+                playSfx('boot');
+                setAuthStatus('setup_done');
+                speakText("Setup complete. Login now with your face.", () => {
+                  setIsSetupComplete(true);
+                  setAuthStatus('locked');
+                });
+              } else {
+                const savedDescriptorStr = localStorage.getItem('aifa_user_face_descriptor');
+                if (savedDescriptorStr) {
+                  const savedDescriptor = new Float32Array(JSON.parse(savedDescriptorStr));
+                  const distance = faceapi.euclideanDistance(descriptors[0], savedDescriptor);
+                  if (distance < 0.5) { // Threshold for match
+                    playSfx('auth_success');
+                    setIsUnlocked(true);
+                    speakText(`Welcome back, Master. Initializing Aifa core.`);
+                  } else {
+                    playSfx('auth_fail');
+                    setAuthStatus('failed');
+                    speakText("Wrong face detected. Access denied.");
+                    setTimeout(() => setAuthStatus('locked'), 2000);
+                  }
+                } else {
+                   playSfx('auth_fail');
+                   setAuthStatus('failed');
+                   speakText("No enrolled face found.");
+                   setTimeout(() => setAuthStatus('locked'), 2000);
+                }
+              }
+              return; // End the loop
+            }
+          } catch (err) {
+            console.error("Detection error:", err);
           }
         }
-      }, 1500);
+        
+        if (isScanning) {
+          scanTimeout = setTimeout(performScan, 1500);
+        }
+      };
+
+      // Start the loop
+      scanTimeout = setTimeout(performScan, 1000);
 
       // Timeout after 15 seconds
       setTimeout(() => {
-        if (scanCount < maxScans) {
-          clearInterval(scanInterval);
+        if (isScanning) {
+          isScanning = false;
+          if (scanTimeout) clearTimeout(scanTimeout);
           stream.getTracks().forEach(track => track.stop());
           playSfx('auth_fail');
           setAuthStatus('failed');

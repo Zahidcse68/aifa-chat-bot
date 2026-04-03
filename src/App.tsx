@@ -205,6 +205,11 @@ export default function App() {
   const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const tasksRef = useRef(tasks);
+
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
 
   // --- Initialization & Clock Loop ---
   useEffect(() => {
@@ -232,6 +237,16 @@ export default function App() {
             playSfx('alarm');
             setActiveAlarm(t.text);
             setTimeout(() => setActiveAlarm(null), 5000);
+            
+            // Notify Aifa about the alarm if connected, otherwise speak locally
+            if (isConnectedRef.current && sessionRef.current) {
+              sessionRef.current.sendRealtimeInput([{
+                text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}". Please announce this to the user immediately.`
+              }]);
+            } else {
+              speakText(`Master, reminder: ${t.text}`);
+            }
+
             return { ...t, alarmTriggered: true };
           }
           return t;
@@ -378,11 +393,11 @@ export default function App() {
           functionDeclarations: [
             {
               name: 'manageTasks',
-              description: 'Add, complete, or remove tasks/schedules from the users on-screen task list.',
+              description: 'Add, complete, remove, or list tasks/schedules from the users on-screen task list.',
               parameters: {
                 type: Type.OBJECT,
                 properties: {
-                  action: { type: Type.STRING, description: 'add, complete, or remove' },
+                  action: { type: Type.STRING, description: 'add, complete, remove, or list' },
                   taskText: { type: Type.STRING, description: 'The text of the task' },
                   taskId: { type: Type.NUMBER, description: 'The ID of the task (for complete/remove)' },
                   time: { type: Type.STRING, description: 'Scheduled time in HH:MM format (24-hour) for alarms. e.g. "14:30"' }
@@ -533,8 +548,10 @@ export default function App() {
                   // TASK MANAGEMENT
                   if (call.name === 'manageTasks') {
                     const { action, taskText, taskId, time: scheduledTime } = call.args;
-                    addLog(`[TASK] ${action.toUpperCase()}: ${taskText || taskId}`);
+                    addLog(`[TASK] ${action.toUpperCase()}: ${taskText || taskId || 'all'}`);
                     playSfx('task_action');
+                    
+                    let responseMsg = `Task ${action} successful.`;
                     
                     if (action === 'add' && taskText) {
                       setTasks(prev => [...prev, { id: Date.now(), text: taskText as string, done: false, time: scheduledTime as string }]);
@@ -542,6 +559,8 @@ export default function App() {
                       setTasks(prev => prev.map(t => t.id === taskId || t.text?.toLowerCase().includes((taskText as string)?.toLowerCase()) ? { ...t, done: true } : t));
                     } else if (action === 'remove') {
                       setTasks(prev => prev.filter(t => t.id !== taskId && !t.text?.toLowerCase().includes((taskText as string)?.toLowerCase())));
+                    } else if (action === 'list') {
+                      responseMsg = `Current tasks: ${JSON.stringify(tasksRef.current)}`;
                     }
 
                     sessionPromise.then(session => {
@@ -550,7 +569,7 @@ export default function App() {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
-                          response: { success: true, message: `Task ${action} successful.` }
+                          response: { success: true, message: responseMsg }
                         }]
                       });
                     });

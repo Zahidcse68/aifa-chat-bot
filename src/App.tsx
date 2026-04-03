@@ -1,5 +1,5 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
-import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Crosshair, Download, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, ShieldCheck, Square, Terminal, UserPlus } from 'lucide-react';
+import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Cloud, Crosshair, Download, Droplets, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, ShieldCheck, Square, Terminal, Thermometer, UserPlus, Wind } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
 
@@ -8,6 +8,23 @@ const apiKey = process.env.GEMINI_API_KEY;
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
 
 const isDesktop = typeof window !== 'undefined' && !!(window as any).electronAPI;
+
+// Mock Data for Weather and Room
+const weatherData = {
+  current: { temp: 24, condition: 'Clear', humidity: 45 },
+  forecast: [
+    { day: 'Tomorrow', temp: 25, condition: 'Sunny' },
+    { day: 'Day 2', temp: 22, condition: 'Cloudy' },
+    { day: 'Day 3', temp: 20, condition: 'Rain' }
+  ]
+};
+
+const roomConditions = {
+  temp: 22.5,
+  humidity: 42,
+  aqi: 35,
+  status: 'Optimal'
+};
 
 // --- SFX Engine (Web Audio API) ---
 let sfxCtx: AudioContext | null = null;
@@ -72,9 +89,27 @@ const playSfx = (type: 'auth_success' | 'auth_fail' | 'task_action' | 'alarm' | 
 };
 
 // --- TTS Engine for Auth Prompts ---
+let currentUtterance: SpeechSynthesisUtterance | null = null;
+let speakTimeout: any = null;
+
 const speakText = (text: string, onEnd?: () => void) => {
   const synth = window.speechSynthesis;
+  if (!synth) {
+    console.warn("Speech synthesis not supported");
+    if (onEnd) onEnd();
+    return;
+  }
+  
+  try {
+    synth.cancel(); // Cancel any ongoing speech to prevent queuing issues
+  } catch (e) {
+    console.warn("Failed to cancel speech synthesis", e);
+  }
+  
+  if (speakTimeout) clearTimeout(speakTimeout);
+  
   const utterance = new SpeechSynthesisUtterance(text);
+  currentUtterance = utterance; // Prevent garbage collection
   
   const voices = synth.getVoices();
   const femaleVoice = voices.find(v => 
@@ -88,7 +123,26 @@ const speakText = (text: string, onEnd?: () => void) => {
   utterance.pitch = 1.3; 
   utterance.rate = 1.1;
   
-  if (onEnd) utterance.onend = onEnd;
+  const finish = () => {
+    if (speakTimeout) clearTimeout(speakTimeout);
+    if (onEnd) onEnd();
+    currentUtterance = null;
+  };
+
+  utterance.onend = finish;
+  utterance.onerror = (e) => {
+    console.error("Speech synthesis error", e);
+    finish();
+  };
+  
+  // Fallback timeout in case speech synthesis gets completely stuck
+  // Estimate time: ~100ms per character + 2 seconds buffer
+  const estimatedTime = (text.length * 100) + 2000;
+  speakTimeout = setTimeout(() => {
+    console.warn("Speech synthesis timeout fallback triggered");
+    finish();
+  }, estimatedTime);
+  
   synth.speak(utterance);
 };
 
@@ -115,12 +169,11 @@ const AnimatedGraph = ({ active }: { active: boolean }) => {
 export default function App() {
   // Setup & Auth State
   const [isSetupComplete, setIsSetupComplete] = useState<boolean | null>(null);
-  const [userName, setUserName] = useState<string>('');
-  const [userPassword, setUserPassword] = useState<string>('');
+  const userName = 'Master';
   const [userFaceData, setUserFaceData] = useState<string | null>(null);
   
   const [isUnlocked, setIsUnlocked] = useState(false);
-  const [authStatus, setAuthStatus] = useState<'locked' | 'listening_name' | 'asking_password' | 'listening_password' | 'scanning_face' | 'failed' | 'setup_name' | 'setup_password' | 'setup_face' | 'setup_done'>('locked');
+  const [authStatus, setAuthStatus] = useState<'locked' | 'scanning_face' | 'failed' | 'setup_face' | 'setup_done'>('locked');
 
   // System State
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected'>('idle');
@@ -156,12 +209,8 @@ export default function App() {
   // --- Initialization & Clock Loop ---
   useEffect(() => {
     // Check Setup
-    const savedName = localStorage.getItem('aifa_user_name');
-    const savedPass = localStorage.getItem('aifa_user_password');
     const savedFace = localStorage.getItem('aifa_user_face');
-    if (savedName && savedPass && savedFace) {
-      setUserName(savedName);
-      setUserPassword(savedPass);
+    if (savedFace) {
       setUserFaceData(savedFace);
       setIsSetupComplete(true);
     } else {
@@ -244,111 +293,41 @@ export default function App() {
       
       // Simulate scanning process
       setTimeout(() => {
+        let faceData = 'dummy_face_data';
         if (canvasRef.current && videoRef.current) {
           const ctx = canvasRef.current.getContext('2d');
           if (ctx) {
             ctx.drawImage(videoRef.current, 0, 0, canvasRef.current.width, canvasRef.current.height);
-            const faceData = canvasRef.current.toDataURL('image/jpeg');
-            
-            // Stop camera
-            stream.getTracks().forEach(track => track.stop());
-            
-            if (isSetup) {
-              localStorage.setItem('aifa_user_face', faceData);
-              setUserFaceData(faceData);
-              playSfx('boot');
-              setAuthStatus('setup_done');
-              speakText("Setup complete. Initializing Aifa core.", () => {
-                setIsSetupComplete(true);
-                setIsUnlocked(true);
-              });
-            } else {
-              // In a real app, you'd compare the faceData here.
-              // For this demo, we'll just assume it matches if they got this far.
-              playSfx('auth_success');
-              setIsUnlocked(true);
-              speakText(`Welcome back, ${userName}. Initializing Aifa core.`);
-            }
+            faceData = canvasRef.current.toDataURL('image/jpeg');
           }
+        }
+        
+        // Stop camera
+        stream.getTracks().forEach(track => track.stop());
+        
+        if (isSetup) {
+          localStorage.setItem('aifa_user_face', faceData);
+          setUserFaceData(faceData);
+          playSfx('boot');
+          setAuthStatus('setup_done');
+          speakText("Setup complete. Initializing Aifa core.", () => {
+            setIsSetupComplete(true);
+            setIsUnlocked(true);
+          });
+        } else {
+          // In a real app, you'd compare the faceData here.
+          // For this demo, we'll just assume it matches if they got this far.
+          playSfx('auth_success');
+          setIsUnlocked(true);
+          speakText(`Welcome back, Master. Initializing Aifa core.`);
         }
       }, 3000); // 3 seconds scan time
     } catch (err) {
       console.error("Camera access denied", err);
       playSfx('auth_fail');
       setAuthStatus('failed');
-      setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_name'), 2000);
+      setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_face'), 2000);
     }
-  };
-
-  // --- Voice Setup & Authentication ---
-  const startVoiceAuth = (step: 'name' | 'password' | 'setup_name' | 'setup_password' = 'name') => {
-    initSfx();
-    const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      playSfx('auth_success');
-      setIsUnlocked(true);
-      speakText(`Welcome back, ${userName || 'Master'}.`);
-      return;
-    }
-
-    const recognition = new SpeechRecognition();
-    recognition.lang = 'en-IN';
-    recognition.interimResults = false;
-    
-    setAuthStatus(step === 'name' ? 'listening_name' : step === 'password' ? 'listening_password' : step);
-    
-    recognition.onresult = (event: any) => {
-      const transcript = event.results[0][0].transcript.toLowerCase().trim();
-      console.log(`Heard (${step}):`, transcript);
-      
-      if (step === 'setup_name') {
-        localStorage.setItem('aifa_user_name', transcript);
-        setUserName(transcript);
-        playSfx('auth_success');
-        setAuthStatus('setup_password');
-        speakText(`Voice print saved. Hello ${transcript}. Please state a secure password.`, () => {
-          startVoiceAuth('setup_password');
-        });
-      } else if (step === 'setup_password') {
-        localStorage.setItem('aifa_user_password', transcript);
-        setUserPassword(transcript);
-        playSfx('auth_success');
-        speakText("Password saved. Now, please look at the camera for facial recognition setup.", () => {
-          startFaceScan(true);
-        });
-      } else if (step === 'name') {
-        if (transcript.includes(userName.toLowerCase()) || userName.toLowerCase().includes(transcript)) {
-          playSfx('auth_success');
-          setAuthStatus('asking_password');
-          speakText("Voice recognized. Please state your password.", () => {
-            startVoiceAuth('password');
-          });
-        } else {
-          playSfx('auth_fail');
-          setAuthStatus('failed');
-          setTimeout(() => setAuthStatus('locked'), 2000);
-        }
-      } else if (step === 'password') {
-        if (transcript.includes(userPassword.toLowerCase()) || userPassword.toLowerCase().includes(transcript)) {
-          playSfx('auth_success');
-          speakText("Password accepted. Initiating facial scan.", () => {
-            startFaceScan(false);
-          });
-        } else {
-          playSfx('auth_fail');
-          setAuthStatus('failed');
-          setTimeout(() => setAuthStatus('locked'), 2000);
-        }
-      }
-    };
-
-    recognition.onerror = () => {
-      playSfx('auth_fail');
-      setAuthStatus('failed');
-      setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_name'), 2000);
-    };
-
-    recognition.start();
   };
 
   // --- Gemini Live Connection ---
@@ -422,6 +401,14 @@ export default function App() {
                 },
                 required: ['action']
               }
+            },
+            {
+              name: 'logoutSystem',
+              description: 'Log the user out of the system and return to the lock screen.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {}
+              }
             }
           ]
         }
@@ -447,8 +434,8 @@ export default function App() {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
         },
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'.`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You are in a web sandbox. You can control the HUD via 'controlHUD' and manage scheduled tasks via 'manageTasks'.`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can log him out via 'logoutSystem'.`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', and log him out via 'logoutSystem'.`,
         tools: tools,
       };
 
@@ -608,6 +595,26 @@ export default function App() {
                     });
                   }
                   
+                  // LOGOUT SYSTEM
+                  if (call.name === 'logoutSystem') {
+                    addLog(`[SYS] Logging out...`);
+                    playSfx('auth_fail');
+                    disconnect();
+                    setIsUnlocked(false);
+                    setAuthStatus('locked');
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Logged out successfully.` }
+                        }]
+                      });
+                    });
+                  }
+                  
                   // SYSTEM COMMANDS
                   if (call.name === 'executeSystemCommand') {
                     const cmd = call.args.command as string;
@@ -690,6 +697,18 @@ export default function App() {
     setFocusedElement('none');
   };
 
+  // --- Auto-Connect on Unlock ---
+  useEffect(() => {
+    if (isUnlocked && connectionState === 'idle') {
+      const timer = setTimeout(() => {
+        if (isConnectedRef.current === false) {
+          connect();
+        }
+      }, 1500); // Wait for the welcome message to finish speaking
+      return () => clearTimeout(timer);
+    }
+  }, [isUnlocked, connectionState]);
+
   // Get next scheduled task
   const nextTask = tasks.filter(t => !t.done && t.time).sort((a, b) => (a.time! > b.time! ? 1 : -1))[0];
 
@@ -714,13 +733,17 @@ export default function App() {
         <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
         
         <motion.div 
-          animate={{ scale: (authStatus === 'setup_name' || authStatus === 'setup_password') ? [1, 1.05, 1] : 1 }}
+          animate={{ scale: authStatus === 'setup_face' ? [1, 1.05, 1] : 1 }}
           transition={{ repeat: Infinity, duration: 1.5 }}
           className="relative z-10 flex flex-col items-center text-center max-w-lg"
         >
           <div className="w-32 h-32 rounded-full border-2 border-cyan-400 text-cyan-400 flex items-center justify-center mb-8 shadow-[0_0_40px_rgba(6,182,212,0.6)] overflow-hidden relative">
             {authStatus === 'setup_face' ? (
-              <video ref={videoRef} className="w-full h-full object-cover" autoPlay muted playsInline />
+              <>
+                <video ref={videoRef} className="w-full h-full object-cover" autoPlay muted playsInline />
+                <div className="absolute inset-0 bg-cyan-500/20 animate-pulse mix-blend-overlay" />
+                <div className="absolute inset-0 border-t-2 border-cyan-400 animate-[scan_2s_ease-in-out_infinite]" />
+              </>
             ) : (
               <UserPlus className="w-12 h-12" />
             )}
@@ -728,22 +751,19 @@ export default function App() {
 
           <h1 className="text-3xl font-light tracking-[0.3em] mb-2">AIFA OS SETUP</h1>
           <p className="text-sm text-cyan-600 tracking-widest mb-12">
-            {authStatus === 'setup_name' ? 'LISTENING FOR YOUR NAME...' : 
-             authStatus === 'setup_password' ? 'LISTENING FOR YOUR NEW PASSWORD...' : 
-             authStatus === 'setup_face' ? 'SCANNING FACIAL BIOMETRICS...' :
-             'VOICE PRINT ENROLLMENT'}
+            {authStatus === 'setup_face' ? 'SCANNING FACIAL BIOMETRICS...' : 'FACIAL BIOMETRICS ENROLLMENT'}
           </p>
 
           <button 
             onClick={() => {
-              speakText("Welcome to Aifa. Please state your name to register your voice print.", () => {
-                startVoiceAuth('setup_name');
+              speakText("Welcome to Aifa. Please look at the camera to register your facial biometrics.", () => {
+                startFaceScan(true);
               });
             }}
-            disabled={authStatus === 'setup_name' || authStatus === 'setup_password' || authStatus === 'setup_face'}
+            disabled={authStatus === 'setup_face'}
             className="px-8 py-3 border border-cyan-500/50 hover:bg-cyan-900/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all tracking-widest text-sm disabled:opacity-50"
           >
-            {authStatus === 'setup_name' || authStatus === 'setup_password' || authStatus === 'setup_face' ? 'PROCESSING...' : 'START ENROLLMENT'}
+            {authStatus === 'setup_face' ? 'PROCESSING...' : 'START ENROLLMENT'}
           </button>
           <canvas ref={canvasRef} className="hidden" width="640" height="480" />
         </motion.div>
@@ -757,14 +777,13 @@ export default function App() {
         <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
         
         <motion.div 
-          animate={{ scale: (authStatus === 'listening_name' || authStatus === 'listening_password' || authStatus === 'scanning_face') ? [1, 1.05, 1] : 1 }}
+          animate={{ scale: authStatus === 'scanning_face' ? [1, 1.05, 1] : 1 }}
           transition={{ repeat: Infinity, duration: 1.5 }}
           className="relative z-10 flex flex-col items-center"
         >
           <div className={`w-32 h-32 rounded-full border-2 flex items-center justify-center mb-8 transition-colors duration-500 overflow-hidden relative ${
             authStatus === 'failed' ? 'border-red-500 text-red-500 shadow-[0_0_30px_rgba(239,68,68,0.4)]' :
-            (authStatus === 'listening_name' || authStatus === 'listening_password' || authStatus === 'scanning_face') ? 'border-cyan-400 text-cyan-400 shadow-[0_0_40px_rgba(6,182,212,0.6)]' :
-            authStatus === 'asking_password' ? 'border-fuchsia-500 text-fuchsia-500 shadow-[0_0_30px_rgba(217,70,239,0.4)]' :
+            authStatus === 'scanning_face' ? 'border-cyan-400 text-cyan-400 shadow-[0_0_40px_rgba(6,182,212,0.6)]' :
             'border-cyan-900 text-cyan-700'
           }`}>
             {authStatus === 'scanning_face' ? (
@@ -774,29 +793,20 @@ export default function App() {
                 <div className="absolute inset-0 border-t-2 border-cyan-400 animate-[scan_2s_ease-in-out_infinite]" />
               </>
             ) : authStatus === 'failed' ? <Lock className="w-12 h-12" /> : 
-             (authStatus === 'listening_name' || authStatus === 'listening_password') ? <Mic className="w-12 h-12 animate-pulse" /> : 
-             authStatus === 'asking_password' ? <ShieldCheck className="w-12 h-12" /> :
              <Fingerprint className="w-12 h-12" />}
           </div>
 
           <h1 className="text-3xl font-light tracking-[0.3em] mb-2">AIFA OS</h1>
           <p className="text-sm text-cyan-600 tracking-widest mb-12">
-            {authStatus === 'asking_password' || authStatus === 'listening_password' 
-              ? 'SECONDARY AUTH: PASSWORD REQUIRED' 
-              : authStatus === 'scanning_face' ? 'TERTIARY AUTH: FACIAL SCAN'
-              : 'VOICE AUTHENTICATION REQUIRED'}
+            {authStatus === 'scanning_face' ? 'SCANNING BIOMETRICS...' : 'FACIAL AUTHENTICATION REQUIRED'}
           </p>
 
           <button 
-            onClick={() => startVoiceAuth('name')}
-            disabled={authStatus === 'listening_name' || authStatus === 'listening_password' || authStatus === 'asking_password' || authStatus === 'scanning_face'}
+            onClick={() => startFaceScan(false)}
+            disabled={authStatus === 'scanning_face'}
             className="px-8 py-3 border border-cyan-500/50 hover:bg-cyan-900/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.3)] transition-all tracking-widest text-sm disabled:opacity-50"
           >
-            {authStatus === 'listening_name' ? `LISTENING FOR "${userName.toUpperCase()}"...` : 
-             authStatus === 'asking_password' ? 'PROCESSING...' :
-             authStatus === 'listening_password' ? 'LISTENING FOR PASSWORD...' :
-             authStatus === 'scanning_face' ? 'SCANNING BIOMETRICS...' :
-             'INITIATE VOICE AUTH'}
+            {authStatus === 'scanning_face' ? 'SCANNING BIOMETRICS...' : 'INITIATE FACIAL SCAN'}
           </button>
           <canvas ref={canvasRef} className="hidden" width="640" height="480" />
           
@@ -804,11 +814,11 @@ export default function App() {
             <p className="text-red-500 text-xs mt-4 tracking-widest">AUTHENTICATION FAILED. ACCESS DENIED.</p>
           )}
 
-          <button onClick={() => { playSfx('auth_success'); setIsUnlocked(true); speakText(`Welcome back, ${userName}.`); }} className="absolute bottom-10 text-[10px] text-cyan-900 hover:text-cyan-600 tracking-widest">
+          <button onClick={() => { playSfx('auth_success'); setIsUnlocked(true); speakText(`Welcome back, Master.`); }} className="absolute bottom-10 text-[10px] text-cyan-900 hover:text-cyan-600 tracking-widest">
             [ MANUAL OVERRIDE ]
           </button>
           <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="absolute bottom-4 text-[10px] text-red-900 hover:text-red-600 tracking-widest">
-            [ RESET VOICE PRINT ]
+            [ RESET BIOMETRICS ]
           </button>
         </motion.div>
       </div>
@@ -852,12 +862,14 @@ export default function App() {
       >
         {/* Left Panel: System Monitor */}
         <motion.aside 
+          drag
+          dragMomentum={false}
           animate={{ 
             scale: focusedElement === 'monitor' ? 1.1 : 1,
             zIndex: focusedElement === 'monitor' ? 50 : 20,
             boxShadow: focusedElement === 'monitor' ? '0 0 50px rgba(6,182,212,0.2)' : 'none'
           }}
-          className="w-80 border-r border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500"
+          className="w-80 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500 absolute left-0 top-0 bottom-0 cursor-move"
         >
           <div className="p-6 border-b border-cyan-900/50">
             <div className="flex items-center gap-3 mb-4">
@@ -906,7 +918,7 @@ export default function App() {
         </motion.aside>
 
         {/* Center Panel: Orb & Controls */}
-        <main className="flex-1 flex flex-col relative overflow-hidden">
+        <main className="flex-1 flex flex-col relative overflow-hidden pointer-events-none">
           {/* Header */}
           <header className="absolute top-0 w-full p-6 flex justify-between items-center z-20 pointer-events-none">
             <div className="flex items-center gap-3">
@@ -965,7 +977,7 @@ export default function App() {
               className="absolute w-[600px] h-[600px] bg-cyan-600 rounded-full blur-[150px] pointer-events-none"
             />
 
-            <div className="relative z-10 flex flex-col items-center">
+            <div className="relative z-10 flex flex-col items-center pointer-events-auto">
               <motion.button
                 onClick={connectionState === 'connected' ? disconnect : connect}
                 disabled={connectionState === 'connecting'}
@@ -1035,7 +1047,7 @@ export default function App() {
           </motion.div>
 
           {/* Footer */}
-          <footer className="p-8 flex justify-center z-20">
+          <footer className="p-8 flex justify-center z-20 pointer-events-auto">
             <button
               onClick={connectionState === 'connected' ? disconnect : connect}
               disabled={connectionState === 'connecting'}
@@ -1067,12 +1079,14 @@ export default function App() {
 
         {/* Right Panel: Tasks & Schedule */}
         <motion.aside 
+          drag
+          dragMomentum={false}
           animate={{ 
             scale: focusedElement === 'tasks' ? 1.1 : 1,
             zIndex: focusedElement === 'tasks' ? 50 : 20,
             boxShadow: focusedElement === 'tasks' ? '0 0 50px rgba(6,182,212,0.2)' : 'none'
           }}
-          className="w-80 border-l border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500"
+          className="w-80 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500 absolute right-0 top-0 bottom-0 cursor-move"
         >
           
           {/* Next Execution Widget */}
@@ -1139,6 +1153,86 @@ export default function App() {
                   </motion.div>
                 ))
               )}
+            </div>
+          </div>
+        </motion.aside>
+        {/* Weather Panel */}
+        <motion.aside
+          drag
+          dragMomentum={false}
+          initial={{ x: 350, y: 100 }}
+          className="w-72 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30"
+        >
+          <div className="p-4 border-b border-cyan-900/50">
+            <div className="flex items-center gap-2 mb-2">
+              <Cloud className="w-4 h-4 text-cyan-400" />
+              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400">ATMOSPHERICS</h2>
+            </div>
+            <div className="flex items-end gap-4 mt-4">
+              <div className="text-4xl font-light text-cyan-100">{weatherData.current.temp}°C</div>
+              <div className="pb-1">
+                <div className="text-sm text-cyan-300">{weatherData.current.condition}</div>
+                <div className="text-xs text-cyan-600 font-mono">HUMIDITY: {weatherData.current.humidity}%</div>
+              </div>
+            </div>
+          </div>
+          <div className="p-4 bg-cyan-950/20">
+            <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">72-HOUR FORECAST</h3>
+            <div className="space-y-2">
+              {weatherData.forecast.map((day, i) => (
+                <div key={i} className="flex justify-between items-center text-sm font-mono border-b border-cyan-900/30 pb-2 last:border-0 last:pb-0">
+                  <span className="text-cyan-500">{day.day}</span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-cyan-300">{day.condition}</span>
+                    <span className="text-cyan-100 w-8 text-right">{day.temp}°</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </motion.aside>
+
+        {/* Room Conditions Panel */}
+        <motion.aside
+          drag
+          dragMomentum={false}
+          initial={{ x: 350, y: 450 }}
+          className="w-72 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30"
+        >
+          <div className="p-4 border-b border-cyan-900/50">
+            <div className="flex items-center gap-2 mb-2">
+              <Thermometer className="w-4 h-4 text-cyan-400" />
+              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400">ENVIRONMENT</h2>
+            </div>
+          </div>
+          <div className="p-4 grid grid-cols-2 gap-4">
+            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+              <div className="flex items-center gap-2 mb-1">
+                <Thermometer className="w-3 h-3 text-cyan-600" />
+                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">TEMP</span>
+              </div>
+              <div className="text-lg text-cyan-300 font-mono">{roomConditions.temp}°C</div>
+            </div>
+            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+              <div className="flex items-center gap-2 mb-1">
+                <Droplets className="w-3 h-3 text-cyan-600" />
+                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">HUMIDITY</span>
+              </div>
+              <div className="text-lg text-cyan-300 font-mono">{roomConditions.humidity}%</div>
+            </div>
+            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+              <div className="flex items-center gap-2 mb-1">
+                <Wind className="w-3 h-3 text-cyan-600" />
+                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">AQI</span>
+              </div>
+              <div className="text-lg text-green-400 font-mono">{roomConditions.aqi}</div>
+            </div>
+            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+              <div className="flex items-center gap-2 mb-1">
+                <Activity className="w-3 h-3 text-cyan-600" />
+                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">STATUS</span>
+              </div>
+              <div className="text-sm text-cyan-300 font-mono mt-1">{roomConditions.status}</div>
             </div>
           </div>
         </motion.aside>

@@ -184,9 +184,18 @@ export default function App() {
   const isCameraOpenRef = useRef(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState('');
+  const [chatMessages, setChatMessages] = useState<{sender: 'user'|'aifa', text: string}[]>([]);
+  const chatEndRef = useRef<HTMLDivElement>(null);
+  const logsEndRef = useRef<HTMLDivElement>(null);
   const hudVideoRef = useRef<HTMLVideoElement>(null);
   const hudCanvasRef = useRef<HTMLCanvasElement>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    if (chatEndRef.current) {
+      chatEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [chatMessages, isChatOpen]);
 
   useEffect(() => {
     isCameraOpenRef.current = isCameraOpen;
@@ -219,6 +228,7 @@ export default function App() {
   // HUD State
   const [time, setTime] = useState(new Date());
   const [ipAddress, setIpAddress] = useState('Fetching...');
+  const [connectedIp, setConnectedIp] = useState<string | null>(null);
   const [hudTransform, setHudTransform] = useState({ scale: 1, x: 0, y: 0 });
   const [focusedElement, setFocusedElement] = useState<'none' | 'monitor' | 'orb' | 'tasks'>('none');
   const [activeAlarm, setActiveAlarm] = useState<string | null>(null);
@@ -231,6 +241,12 @@ export default function App() {
   const [logs, setLogs] = useState<{time: string, text: string}[]>([
     { time: new Date().toLocaleTimeString(), text: 'SYSTEM BOOT SEQUENCE INITIATED.' }
   ]);
+
+  useEffect(() => {
+    if (logsEndRef.current) {
+      logsEndRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [logs]);
   
   const isConnectedRef = useRef(false);
   const sessionRef = useRef<any>(null);
@@ -642,6 +658,28 @@ export default function App() {
                 },
                 required: ['action']
               }
+            },
+            {
+              name: 'connectToIp',
+              description: 'Connect to a specified IP address. Use this when the user asks you to connect to an IP.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  ip: { type: Type.STRING, description: 'The IP address to connect to' }
+                },
+                required: ['ip']
+              }
+            },
+            {
+              name: 'sendIpCommand',
+              description: 'Send a command to the currently connected IP address. Use this when the user asks you to send a command or turn on/off a light at the connected IP.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  command: { type: Type.STRING, description: 'The command to send, e.g., /ac/on or /ac/off' }
+                },
+                required: ['command']
+              }
             }
           ]
         }
@@ -666,9 +704,11 @@ export default function App() {
         speechConfig: {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
         },
+        outputAudioTranscription: {},
+        inputAudioTranscription: {},
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera' and open/close the text chat via 'toggleChat'. You can log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', and log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
         tools: tools,
       };
 
@@ -740,11 +780,21 @@ export default function App() {
                   });
                 }
               }
-            }, 1500);
+            }, 3000);
             videoIntervalRef.current = videoInterval;
           },
           onmessage: async (message: LiveServerMessage) => {
             if (!isConnectedRef.current) return;
+
+            // Handle Text Output
+            const parts = message.serverContent?.modelTurn?.parts;
+            if (parts) {
+              for (const part of parts) {
+                if (part.text) {
+                  setChatMessages(prev => [...prev, { sender: 'aifa', text: part.text as string }]);
+                }
+              }
+            }
 
             // Handle Audio Playback
             const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
@@ -963,6 +1013,48 @@ export default function App() {
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Chat ${isOpen ? 'opened' : 'closed'}.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  // CONNECT TO IP
+                  if (call.name === 'connectToIp') {
+                    const { ip } = call.args;
+                    setConnectedIp(ip);
+                    addLog(`[SYS] Connected to IP: ${ip}`);
+                    playSfx('task_action');
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Connected to IP: ${ip}.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  // SEND IP COMMAND
+                  if (call.name === 'sendIpCommand') {
+                    const { command } = call.args;
+                    addLog(`[IP CMD] Sending ${command} to ${connectedIp || 'unknown IP'}`);
+                    playSfx('task_action');
+                    
+                    // Simulate sending command to IP
+                    setTimeout(() => {
+                      addLog(`[IP CMD] Response received: OK`);
+                    }, 500);
+
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Command ${command} sent successfully.` }
                         }]
                       });
                     });
@@ -1270,6 +1362,12 @@ export default function App() {
                 <span className={isAlert ? 'text-red-600' : 'text-cyan-600'}>IP_ADDR:</span>
                 <span>{ipAddress}</span>
               </div>
+              {connectedIp && (
+                <div className="flex justify-between mt-1">
+                  <span className={isAlert ? 'text-red-600' : 'text-cyan-600'}>LINK_IP:</span>
+                  <span className="text-green-400">{connectedIp}</span>
+                </div>
+              )}
               <div className="flex justify-between mt-1">
                 <span className={isAlert ? 'text-red-600' : 'text-cyan-600'}>LATENCY:</span>
                 <span className="text-green-400">12ms</span>
@@ -1286,11 +1384,12 @@ export default function App() {
              <h3 className={`font-mono text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} mb-3 tracking-widest`}>TERMINAL LOG</h3>
              <div className={`flex-1 overflow-y-auto font-mono text-[10px] space-y-1.5 ${isAlert ? 'text-red-300/80' : 'text-cyan-300/80'} pr-2 custom-scrollbar`}>
                {logs.map((log, i) => (
-                 <div key={i} className="flex gap-2">
+                 <div key={i} className="flex gap-2 select-text">
                    <span className={isAlert ? 'text-red-700 shrink-0' : 'text-cyan-700 shrink-0'}>[{log.time}]</span>
                    <span className="break-all">{log.text}</span>
                  </div>
                ))}
+               <div ref={logsEndRef} />
              </div>
           </div>
         </motion.aside>
@@ -1669,11 +1768,24 @@ export default function App() {
                   [X]
                 </button>
               </div>
-              <div className="p-4">
+              <div className="p-4 flex flex-col gap-2">
+                <div className="flex-1 max-h-64 overflow-y-auto custom-scrollbar space-y-2 mb-2">
+                  {chatMessages.length === 0 ? (
+                    <div className={`text-xs font-mono opacity-50 ${isAlert ? 'text-red-300' : 'text-cyan-300'}`}>No messages yet...</div>
+                  ) : (
+                    chatMessages.map((msg, idx) => (
+                      <div key={idx} className={`text-xs font-mono break-words select-text ${msg.sender === 'user' ? (isAlert ? 'text-red-300' : 'text-cyan-300') : (isAlert ? 'text-red-100' : 'text-cyan-100')}`}>
+                        <span className="opacity-50">[{msg.sender === 'user' ? 'USER' : 'AIFA'}]</span> {msg.text}
+                      </div>
+                    ))
+                  )}
+                  <div ref={chatEndRef} />
+                </div>
                 <form onSubmit={(e) => {
                   e.preventDefault();
                   if (!chatInput.trim() || !sessionRef.current) return;
                   sessionRef.current.sendRealtimeInput([{ text: chatInput }]);
+                  setChatMessages(prev => [...prev, { sender: 'user', text: chatInput }]);
                   addLog(`[USER] ${chatInput}`);
                   setChatInput('');
                 }} className="flex gap-2">

@@ -1,0 +1,81 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users/{userId}/tasks
+    // Document ID: {taskId}
+    // Fields:
+    //   - id: number (required)
+    //   - text: string (required)
+    //   - done: boolean (required)
+    //   - time: string (optional)
+    //   - alarmTriggered: boolean (optional)
+    //   - userId: string (required)
+    //
+    // Collection: users/{userId}/preferences
+    // Document ID: default
+    // Fields:
+    //   - userId: string (required)
+    //   - userName: string (optional)
+    //   - faceEnrolled: boolean (optional)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function isValidTask(data, userId) {
+      return hasRequiredFields(['id', 'text', 'done', 'userId']) &&
+             data.id is number &&
+             data.text is string && data.text.size() < 500 &&
+             data.done is bool &&
+             data.userId == userId &&
+             (!('time' in data) || (data.time is string && data.time.size() <= 5)) &&
+             (!('alarmTriggered' in data) || data.alarmTriggered is bool);
+    }
+
+    function isValidPreferences(data, userId) {
+      return hasRequiredFields(['userId']) &&
+             data.userId == userId &&
+             (!('userName' in data) || (data.userName is string && data.userName.size() < 100)) &&
+             (!('faceEnrolled' in data) || data.faceEnrolled is bool);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    match /users/{userId}/tasks/{taskId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidTask(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidTask(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/preferences/{prefId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidPreferences(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidPreferences(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+    }
+  }
+}

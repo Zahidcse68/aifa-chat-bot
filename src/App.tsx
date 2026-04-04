@@ -3,6 +3,9 @@ import * as faceapi from '@vladmandic/face-api';
 import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Cloud, Crosshair, Download, Droplets, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, ShieldCheck, Square, Terminal, Thermometer, UserPlus, Wind } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
+import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from 'firebase/auth';
+import { doc, setDoc, onSnapshot, collection, deleteDoc } from 'firebase/firestore';
+import { auth, db } from './firebase';
 
 // Initialize Gemini API safely
 const apiKey = process.env.GEMINI_API_KEY;
@@ -178,6 +181,8 @@ export default function App() {
   const [authStatus, setAuthStatus] = useState<'locked' | 'scanning_face' | 'failed' | 'setup_face' | 'setup_done'>('locked');
 
   // System State
+  const [systemStatus, setSystemStatus] = useState<'Locked' | 'Authorized' | 'Processing' | 'Alert'>('Locked');
+  const [userId, setUserId] = useState<string | null>(null);
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected'>('idle');
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [statusText, setStatusText] = useState('SYSTEM STANDBY');
@@ -204,10 +209,48 @@ export default function App() {
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<ScriptProcessorNode | null>(null);
   const nextPlayTimeRef = useRef<number>(0);
-  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([]);
+  const activeSourcesRef = useRef<{source: AudioBufferSourceNode, gainNode: GainNode}[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const tasksRef = useRef(tasks);
+  const videoIntervalRef = useRef<any>(null);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setUserId(user.uid);
+      } else {
+        setUserId(null);
+      }
+    });
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!userId) return;
+    const unsubTasks = onSnapshot(collection(db, `users/${userId}/tasks`), (snapshot) => {
+      const loadedTasks: any[] = [];
+      snapshot.forEach(doc => {
+        loadedTasks.push(doc.data());
+      });
+      loadedTasks.sort((a, b) => a.id - b.id);
+      setTasks(loadedTasks);
+    });
+    
+    const unsubPrefs = onSnapshot(doc(db, `users/${userId}/preferences/default`), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.faceEnrolled) {
+           setIsSetupComplete(true);
+           setUserFaceData('enrolled');
+        }
+      }
+    });
+    return () => {
+      unsubTasks();
+      unsubPrefs();
+    };
+  }, [userId]);
 
   useEffect(() => {
     tasksRef.current = tasks;
@@ -219,7 +262,7 @@ export default function App() {
       try {
         const MODEL_URL = 'https://vladmandic.github.io/face-api/model/';
         await Promise.all([
-          faceapi.nets.ssdMobilenetv1.loadFromUri(MODEL_URL),
+          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
           faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
         ]);
@@ -338,7 +381,7 @@ export default function App() {
         
         if (videoRef.current && videoRef.current.readyState === 4) {
           try {
-            const detection = await faceapi.detectSingleFace(videoRef.current).withFaceLandmarks().withFaceDescriptor();
+            const detection = await faceapi.detectSingleFace(videoRef.current, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
             
             if (detection) {
               descriptors.push(detection.descriptor);
@@ -360,6 +403,9 @@ export default function App() {
                 localStorage.setItem('aifa_user_face_descriptor', JSON.stringify(descriptorArray));
                 localStorage.setItem('aifa_user_face', 'enrolled');
                 setUserFaceData('enrolled');
+                if (userId) {
+                  setDoc(doc(db, `users/${userId}/preferences/default`), { faceEnrolled: true }, { merge: true }).catch(console.error);
+                }
                 playSfx('boot');
                 setAuthStatus('setup_done');
                 speakText("Setup complete. Login now with your face.", () => {
@@ -374,18 +420,21 @@ export default function App() {
                   if (distance < 0.5) { // Threshold for match
                     playSfx('auth_success');
                     setIsUnlocked(true);
+                    setSystemStatus('Authorized');
                     speakText(`Welcome back, Master. Initializing Aifa core.`);
                   } else {
                     playSfx('auth_fail');
                     setAuthStatus('failed');
+                    setSystemStatus('Alert');
                     speakText("Wrong face detected. Access denied.");
-                    setTimeout(() => setAuthStatus('locked'), 2000);
+                    setTimeout(() => { setAuthStatus('locked'); setSystemStatus('Locked'); }, 2000);
                   }
                 } else {
                    playSfx('auth_fail');
                    setAuthStatus('failed');
+                   setSystemStatus('Alert');
                    speakText("No enrolled face found.");
-                   setTimeout(() => setAuthStatus('locked'), 2000);
+                   setTimeout(() => { setAuthStatus('locked'); setSystemStatus('Locked'); }, 2000);
                 }
               }
               return; // End the loop
@@ -411,8 +460,9 @@ export default function App() {
           stream.getTracks().forEach(track => track.stop());
           playSfx('auth_fail');
           setAuthStatus('failed');
+          setSystemStatus('Alert');
           speakText("Scan timed out.");
-          setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_face'), 2000);
+          setTimeout(() => { setAuthStatus(isSetupComplete ? 'locked' : 'setup_face'); setSystemStatus('Locked'); }, 2000);
         }
       }, 15000);
 
@@ -420,20 +470,47 @@ export default function App() {
       console.error("Camera access denied", err);
       playSfx('auth_fail');
       setAuthStatus('failed');
-      setTimeout(() => setAuthStatus(isSetupComplete ? 'locked' : 'setup_face'), 2000);
+      setSystemStatus('Alert');
+      setTimeout(() => { setAuthStatus(isSetupComplete ? 'locked' : 'setup_face'); setSystemStatus('Locked'); }, 2000);
     }
   };
 
   // --- Gemini Live Connection ---
-  const stopAllAudio = () => {
-    activeSourcesRef.current.forEach(source => {
-      try { source.stop(); source.disconnect(); } catch (e) {}
+  const fadeOutAndStopAllAudio = () => {
+    if (!audioContextRef.current) return;
+    const now = audioContextRef.current.currentTime;
+    activeSourcesRef.current.forEach(({ source, gainNode }) => {
+      try {
+        gainNode.gain.setValueAtTime(gainNode.gain.value, now);
+        gainNode.gain.linearRampToValueAtTime(0.01, now + 0.3);
+        setTimeout(() => {
+          try { source.stop(); source.disconnect(); gainNode.disconnect(); } catch (e) {}
+        }, 300);
+      } catch (e) {}
     });
     activeSourcesRef.current = [];
-    if (audioContextRef.current) {
-      nextPlayTimeRef.current = audioContextRef.current.currentTime;
-    }
+    nextPlayTimeRef.current = now;
     setIsSpeaking(false);
+  };
+
+  const duckAudio = () => {
+    if (!audioContextRef.current) return;
+    const now = audioContextRef.current.currentTime;
+    activeSourcesRef.current.forEach(({ gainNode }) => {
+      try {
+        gainNode.gain.setTargetAtTime(0.1, now, 0.1);
+      } catch (e) {}
+    });
+  };
+
+  const unduckAudio = () => {
+    if (!audioContextRef.current) return;
+    const now = audioContextRef.current.currentTime;
+    activeSourcesRef.current.forEach(({ gainNode }) => {
+      try {
+        gainNode.gain.setTargetAtTime(1.0, now, 0.1);
+      } catch (e) {}
+    });
   };
 
   const connect = async () => {
@@ -503,6 +580,17 @@ export default function App() {
                 type: Type.OBJECT,
                 properties: {}
               }
+            },
+            {
+              name: 'setSystemStatus',
+              description: 'Set the global system status (e.g., to trigger an Alert or return to Authorized state).',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  status: { type: Type.STRING, description: 'Locked, Authorized, Processing, or Alert' }
+                },
+                required: ['status']
+              }
             }
           ]
         }
@@ -528,8 +616,8 @@ export default function App() {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
         },
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can log him out via 'logoutSystem'.`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', and log him out via 'logoutSystem'.`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can log him out via 'logoutSystem'. You will receive real-time video frames from the webcam. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', and log him out via 'logoutSystem'. You will receive real-time video frames from the webcam. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
         tools: tools,
       };
 
@@ -548,8 +636,17 @@ export default function App() {
 
               const inputData = e.inputBuffer.getChannelData(0);
               const pcm16 = new Int16Array(inputData.length);
+              let sum = 0;
               for (let i = 0; i < inputData.length; i++) {
+                sum += inputData[i] * inputData[i];
                 pcm16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+              }
+              
+              const rms = Math.sqrt(sum / inputData.length);
+              if (rms > 0.02) {
+                duckAudio();
+              } else {
+                unduckAudio();
               }
               
               const buffer = new Uint8Array(pcm16.buffer);
@@ -568,6 +665,32 @@ export default function App() {
                 console.error("Error sending audio chunk:", err);
               });
             };
+
+            // Start video frame capture
+            const videoInterval = setInterval(() => {
+              if (!isConnectedRef.current || !videoRef.current || !canvasRef.current) return;
+              const video = videoRef.current;
+              const canvas = canvasRef.current;
+              if (video.readyState >= 2) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                const ctx = canvas.getContext('2d');
+                if (ctx) {
+                  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                  const base64Data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+                  sessionPromise.then(session => {
+                    if (isConnectedRef.current) {
+                      session.sendRealtimeInput({
+                        video: { data: base64Data, mimeType: 'image/jpeg' }
+                      });
+                    }
+                  }).catch(err => {
+                    console.error("Error sending video frame:", err);
+                  });
+                }
+              }
+            }, 1500);
+            videoIntervalRef.current = videoInterval;
           },
           onmessage: async (message: LiveServerMessage) => {
             if (!isConnectedRef.current) return;
@@ -596,7 +719,9 @@ export default function App() {
 
               const source = audioCtx.createBufferSource();
               source.buffer = audioBuffer;
-              source.connect(audioCtx.destination);
+              const gainNode = audioCtx.createGain();
+              source.connect(gainNode);
+              gainNode.connect(audioCtx.destination);
               
               if (nextPlayTimeRef.current < audioCtx.currentTime) {
                 nextPlayTimeRef.current = audioCtx.currentTime;
@@ -604,10 +729,10 @@ export default function App() {
               source.start(nextPlayTimeRef.current);
               nextPlayTimeRef.current += audioBuffer.duration;
               
-              activeSourcesRef.current.push(source);
+              activeSourcesRef.current.push({ source, gainNode });
               
               source.onended = () => {
-                activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source);
+                activeSourcesRef.current = activeSourcesRef.current.filter(s => s.source !== source);
                 if (activeSourcesRef.current.length === 0) {
                   setIsSpeaking(false);
                   if (isConnectedRef.current) setStatusText('LISTENING...');
@@ -616,7 +741,7 @@ export default function App() {
             }
 
             if (message.serverContent?.interrupted) {
-              stopAllAudio();
+              fadeOutAndStopAllAudio();
               if (isConnectedRef.current) setStatusText('LISTENING...');
             }
 
@@ -633,11 +758,31 @@ export default function App() {
                     let responseMsg = `Task ${action} successful.`;
                     
                     if (action === 'add' && taskText) {
-                      setTasks(prev => [...prev, { id: Date.now(), text: taskText as string, done: false, time: scheduledTime as string }]);
+                      const newId = Date.now();
+                      const newTask = { id: newId, text: taskText as string, done: false, time: scheduledTime as string || '' };
+                      if (userId) {
+                        setDoc(doc(db, `users/${userId}/tasks/${newId}`), newTask).catch(console.error);
+                      } else {
+                        setTasks(prev => [...prev, newTask]);
+                      }
                     } else if (action === 'complete') {
-                      setTasks(prev => prev.map(t => t.id === taskId || t.text?.toLowerCase().includes((taskText as string)?.toLowerCase()) ? { ...t, done: true } : t));
+                      if (userId) {
+                        const targetTask = tasksRef.current.find(t => t.id === taskId || t.text?.toLowerCase().includes((taskText as string)?.toLowerCase()));
+                        if (targetTask) {
+                          setDoc(doc(db, `users/${userId}/tasks/${targetTask.id}`), { ...targetTask, done: true }, { merge: true }).catch(console.error);
+                        }
+                      } else {
+                        setTasks(prev => prev.map(t => t.id === taskId || t.text?.toLowerCase().includes((taskText as string)?.toLowerCase()) ? { ...t, done: true } : t));
+                      }
                     } else if (action === 'remove') {
-                      setTasks(prev => prev.filter(t => t.id !== taskId && !t.text?.toLowerCase().includes((taskText as string)?.toLowerCase())));
+                      if (userId) {
+                        const targetTask = tasksRef.current.find(t => t.id === taskId || t.text?.toLowerCase().includes((taskText as string)?.toLowerCase()));
+                        if (targetTask) {
+                          deleteDoc(doc(db, `users/${userId}/tasks/${targetTask.id}`)).catch(console.error);
+                        }
+                      } else {
+                        setTasks(prev => prev.filter(t => t.id !== taskId && !t.text?.toLowerCase().includes((taskText as string)?.toLowerCase())));
+                      }
                     } else if (action === 'list') {
                       responseMsg = `Current tasks: ${JSON.stringify(tasksRef.current)}`;
                     }
@@ -712,6 +857,25 @@ export default function App() {
                       });
                     });
                   }
+
+                  // SET SYSTEM STATUS
+                  if (call.name === 'setSystemStatus') {
+                    const { status } = call.args;
+                    addLog(`[SYS] Status changed to ${status}`);
+                    setSystemStatus(status as any);
+                    if (status === 'Alert') playSfx('auth_fail');
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `System status set to ${status}.` }
+                        }]
+                      });
+                    });
+                  }
                   
                   // SYSTEM COMMANDS
                   if (call.name === 'executeSystemCommand') {
@@ -780,6 +944,10 @@ export default function App() {
       try { sessionRef.current.close(); } catch (e) {}
       sessionRef.current = null;
     }
+    if (videoIntervalRef.current) {
+      clearInterval(videoIntervalRef.current);
+      videoIntervalRef.current = null;
+    }
     if (processorRef.current) {
       try { processorRef.current.disconnect(); } catch (e) {}
       processorRef.current.onaudioprocess = null;
@@ -789,7 +957,7 @@ export default function App() {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
-    stopAllAudio();
+    fadeOutAndStopAllAudio();
     setStatusText('SYSTEM STANDBY');
     setHudTransform({ scale: 1, x: 0, y: 0 });
     setFocusedElement('none');
@@ -915,7 +1083,13 @@ export default function App() {
           <button onClick={() => { playSfx('auth_success'); setIsUnlocked(true); speakText(`Welcome back, Master.`); }} className="absolute bottom-10 text-[10px] text-cyan-900 hover:text-cyan-600 tracking-widest">
             [ MANUAL OVERRIDE ]
           </button>
-          <button onClick={() => { localStorage.clear(); window.location.reload(); }} className="absolute bottom-4 text-[10px] text-red-900 hover:text-red-600 tracking-widest">
+          <button onClick={() => { 
+            localStorage.clear(); 
+            if (userId) {
+              setDoc(doc(db, `users/${userId}/preferences/default`), { faceEnrolled: false }, { merge: true }).catch(console.error);
+            }
+            window.location.reload(); 
+          }} className="absolute bottom-4 text-[10px] text-red-900 hover:text-red-600 tracking-widest">
             [ RESET BIOMETRICS ]
           </button>
         </motion.div>
@@ -924,8 +1098,18 @@ export default function App() {
   }
 
   // --- MAIN HUD ---
+  const isAlert = systemStatus === 'Alert';
+  const themeColor = isAlert ? 'red' : 'cyan';
+  const textColor = isAlert ? 'text-red-500' : 'text-cyan-500';
+  const borderColor = isAlert ? 'border-red-900/50' : 'border-cyan-900/50';
+  const bgGradient = isAlert 
+    ? 'bg-[linear-gradient(rgba(239,68,68,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(239,68,68,0.05)_1px,transparent_1px)]' 
+    : 'bg-[linear-gradient(rgba(6,182,212,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.05)_1px,transparent_1px)]';
+  const selectionColor = isAlert ? 'selection:bg-red-500/30' : 'selection:bg-cyan-500/30';
+  const containerBorder = isAlert ? 'border-[8px] border-red-500 animate-[pulse_1s_ease-in-out_infinite]' : '';
+
   return (
-    <div className="flex flex-col h-screen bg-neutral-950 text-cyan-500 font-sans selection:bg-cyan-500/30 overflow-hidden relative">
+    <div className={`flex flex-col h-screen bg-neutral-950 ${textColor} font-sans ${selectionColor} overflow-hidden relative ${containerBorder}`}>
       
       {/* Alarm Overlay */}
       <AnimatePresence>
@@ -946,7 +1130,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* Background Grid */}
-      <div className="absolute inset-0 bg-[linear-gradient(rgba(6,182,212,0.05)_1px,transparent_1px),linear-gradient(90deg,rgba(6,182,212,0.05)_1px,transparent_1px)] bg-[size:40px_40px] pointer-events-none" />
+      <div className={`absolute inset-0 ${bgGradient} bg-[size:40px_40px] pointer-events-none transition-colors duration-1000`} />
 
       {/* HUD Container (Animated for Zoom/Pan) */}
       <motion.div 
@@ -965,49 +1149,49 @@ export default function App() {
           animate={{ 
             scale: focusedElement === 'monitor' ? 1.1 : 1,
             zIndex: focusedElement === 'monitor' ? 50 : 20,
-            boxShadow: focusedElement === 'monitor' ? '0 0 50px rgba(6,182,212,0.2)' : 'none'
+            boxShadow: focusedElement === 'monitor' ? (isAlert ? '0 0 50px rgba(239,68,68,0.2)' : '0 0 50px rgba(6,182,212,0.2)') : 'none'
           }}
-          className="w-80 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500 absolute left-0 top-0 bottom-0 cursor-move"
+          className={`w-80 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500 absolute left-0 top-0 bottom-0 cursor-move`}
         >
-          <div className="p-6 border-b border-cyan-900/50">
+          <div className={`p-6 border-b ${borderColor}`}>
             <div className="flex items-center gap-3 mb-4">
-              <ShieldCheck className="w-5 h-5 text-cyan-400" />
-              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400 uppercase">WELCOME, {userName}</h2>
+              <ShieldCheck className={`w-5 h-5 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+              <h2 className={`font-mono font-bold tracking-widest text-sm ${isAlert ? 'text-red-400' : 'text-cyan-400'} uppercase`}>WELCOME, {userName}</h2>
             </div>
             <div className="font-mono">
-              <div className="text-4xl font-light text-cyan-100 tracking-wider">{time.toLocaleTimeString()}</div>
-              <div className="text-xs text-cyan-600 mt-1 uppercase tracking-widest">{time.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
+              <div className={`text-4xl font-light ${isAlert ? 'text-red-100' : 'text-cyan-100'} tracking-wider`}>{time.toLocaleTimeString()}</div>
+              <div className={`text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} mt-1 uppercase tracking-widest`}>{time.toLocaleDateString(undefined, { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}</div>
             </div>
           </div>
           
-          <div className="p-6 border-b border-cyan-900/50">
+          <div className={`p-6 border-b ${borderColor}`}>
             <div className="flex items-center gap-2 mb-3">
-              <Globe className="w-4 h-4 text-cyan-600" />
-              <h3 className="font-mono text-xs text-cyan-600 tracking-widest">NETWORK STATUS</h3>
+              <Globe className={`w-4 h-4 ${isAlert ? 'text-red-600' : 'text-cyan-600'}`} />
+              <h3 className={`font-mono text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} tracking-widest`}>NETWORK STATUS</h3>
             </div>
-            <div className="font-mono text-sm text-cyan-300 bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+            <div className={`font-mono text-sm ${isAlert ? 'text-red-300 bg-red-950/30 border-red-900/50' : 'text-cyan-300 bg-cyan-950/30 border-cyan-900/50'} p-3 rounded border`}>
               <div className="flex justify-between">
-                <span className="text-cyan-600">IP_ADDR:</span>
+                <span className={isAlert ? 'text-red-600' : 'text-cyan-600'}>IP_ADDR:</span>
                 <span>{ipAddress}</span>
               </div>
               <div className="flex justify-between mt-1">
-                <span className="text-cyan-600">LATENCY:</span>
+                <span className={isAlert ? 'text-red-600' : 'text-cyan-600'}>LATENCY:</span>
                 <span className="text-green-400">12ms</span>
               </div>
             </div>
           </div>
 
-          <div className="p-6 border-b border-cyan-900/50">
-             <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">PROCESS ACTIVITY</h3>
+          <div className={`p-6 border-b ${borderColor}`}>
+             <h3 className={`font-mono text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} mb-3 tracking-widest`}>PROCESS ACTIVITY</h3>
              <AnimatedGraph active={connectionState === 'connected'} />
           </div>
 
           <div className="p-6 flex-1 overflow-hidden flex flex-col">
-             <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">TERMINAL LOG</h3>
-             <div className="flex-1 overflow-y-auto font-mono text-[10px] space-y-1.5 text-cyan-300/80 pr-2 custom-scrollbar">
+             <h3 className={`font-mono text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} mb-3 tracking-widest`}>TERMINAL LOG</h3>
+             <div className={`flex-1 overflow-y-auto font-mono text-[10px] space-y-1.5 ${isAlert ? 'text-red-300/80' : 'text-cyan-300/80'} pr-2 custom-scrollbar`}>
                {logs.map((log, i) => (
                  <div key={i} className="flex gap-2">
-                   <span className="text-cyan-700 shrink-0">[{log.time}]</span>
+                   <span className={isAlert ? 'text-red-700 shrink-0' : 'text-cyan-700 shrink-0'}>[{log.time}]</span>
                    <span className="break-all">{log.text}</span>
                  </div>
                ))}
@@ -1020,18 +1204,18 @@ export default function App() {
           {/* Header */}
           <header className="absolute top-0 w-full p-6 flex justify-between items-center z-20 pointer-events-none">
             <div className="flex items-center gap-3">
-              <div className="p-2 bg-cyan-500/10 rounded-xl border border-cyan-500/20">
-                <Crosshair className="w-5 h-5 text-cyan-400" />
+              <div className={`p-2 ${isAlert ? 'bg-red-500/10 border-red-500/20' : 'bg-cyan-500/10 border-cyan-500/20'} rounded-xl border`}>
+                <Crosshair className={`w-5 h-5 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
               </div>
               <div>
-                <h1 className="font-semibold text-xl tracking-widest text-cyan-100 uppercase">Aifa - My Personal Assistant</h1>
-                <p className="text-xs text-cyan-600 font-mono tracking-widest">
+                <h1 className={`font-semibold text-xl tracking-widest ${isAlert ? 'text-red-100' : 'text-cyan-100'} uppercase`}>Aifa - My Personal Assistant</h1>
+                <p className={`text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} font-mono tracking-widest`}>
                   MK-V // {isDesktop ? 'LOCAL HOST' : 'SANDBOX'}
                 </p>
               </div>
             </div>
             {!isDesktop && (
-              <div className="pointer-events-auto flex items-center gap-2 text-cyan-400 font-mono text-xs bg-cyan-500/10 px-3 py-1.5 rounded-full border border-cyan-500/20">
+              <div className={`pointer-events-auto flex items-center gap-2 ${isAlert ? 'text-red-400 bg-red-500/10 border-red-500/20' : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'} font-mono text-xs px-3 py-1.5 rounded-full border`}>
                 <Download className="w-3 h-3" />
                 <span>npm run dev:desktop</span>
               </div>
@@ -1052,17 +1236,17 @@ export default function App() {
               <motion.div 
                 animate={{ rotate: 360 }} 
                 transition={{ duration: 40, repeat: Infinity, ease: "linear" }}
-                className="absolute w-[700px] h-[700px] rounded-full border border-dashed border-cyan-500/30"
+                className={`absolute w-[700px] h-[700px] rounded-full border border-dashed ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'}`}
               />
               <motion.div 
                 animate={{ rotate: -360 }} 
                 transition={{ duration: 30, repeat: Infinity, ease: "linear" }}
-                className="absolute w-[550px] h-[550px] rounded-full border-2 border-dotted border-cyan-400/20"
+                className={`absolute w-[550px] h-[550px] rounded-full border-2 border-dotted ${isAlert ? 'border-red-400/20' : 'border-cyan-400/20'}`}
               />
               <motion.div 
                 animate={{ rotate: 360 }} 
                 transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-                className="absolute w-[400px] h-[400px] rounded-full border border-cyan-300/10"
+                className={`absolute w-[400px] h-[400px] rounded-full border ${isAlert ? 'border-red-300/10' : 'border-cyan-300/10'}`}
               />
             </div>
 
@@ -1072,7 +1256,7 @@ export default function App() {
                 scale: isSpeaking ? 1.2 : 1
               }}
               transition={{ duration: 2, repeat: Infinity, repeatType: "reverse" }}
-              className="absolute w-[600px] h-[600px] bg-cyan-600 rounded-full blur-[150px] pointer-events-none"
+              className={`absolute w-[600px] h-[600px] ${isAlert ? 'bg-red-600' : 'bg-cyan-600'} rounded-full blur-[150px] pointer-events-none`}
             />
 
             <div className="relative z-10 flex flex-col items-center pointer-events-auto">
@@ -1083,8 +1267,8 @@ export default function App() {
                   scale: connectionState === 'connected' ? (isSpeaking ? [1, 1.1, 1] : [1, 1.02, 1]) : 1,
                   boxShadow: connectionState === 'connected' 
                     ? (isSpeaking 
-                        ? "0 0 100px rgba(6, 182, 212, 0.6), inset 0 0 60px rgba(6, 182, 212, 0.8)" 
-                        : "0 0 60px rgba(6, 182, 212, 0.3), inset 0 0 30px rgba(6, 182, 212, 0.5)")
+                        ? (isAlert ? "0 0 100px rgba(239, 68, 68, 0.6), inset 0 0 60px rgba(239, 68, 68, 0.8)" : "0 0 100px rgba(6, 182, 212, 0.6), inset 0 0 60px rgba(6, 182, 212, 0.8)") 
+                        : (isAlert ? "0 0 60px rgba(239, 68, 68, 0.3), inset 0 0 30px rgba(239, 68, 68, 0.5)" : "0 0 60px rgba(6, 182, 212, 0.3), inset 0 0 30px rgba(6, 182, 212, 0.5)"))
                     : "0 0 0px rgba(6, 182, 212, 0)",
                 }}
                 transition={{
@@ -1094,29 +1278,29 @@ export default function App() {
                 }}
                 className={`w-56 h-56 rounded-full flex items-center justify-center transition-all duration-500 ${
                   connectionState === 'connected' 
-                    ? 'bg-neutral-950 border-2 border-cyan-400/50' 
-                    : 'bg-neutral-950 border-2 border-neutral-800 hover:border-cyan-500/50 hover:bg-neutral-900 disabled:opacity-50 disabled:cursor-not-allowed'
+                    ? `bg-neutral-950 border-2 ${isAlert ? 'border-red-400/50' : 'border-cyan-400/50'}` 
+                    : `bg-neutral-950 border-2 border-neutral-800 hover:${isAlert ? 'border-red-500/50' : 'border-cyan-500/50'} hover:bg-neutral-900 disabled:opacity-50 disabled:cursor-not-allowed`
                 }`}
               >
                 {connectionState === 'connected' ? (
-                  <div className="absolute inset-4 rounded-full border border-cyan-500/30 flex items-center justify-center overflow-hidden">
+                  <div className={`absolute inset-4 rounded-full border ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'} flex items-center justify-center overflow-hidden`}>
                     <motion.div 
                       animate={{ rotate: 360 }}
                       transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
-                      className="absolute inset-0 bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(6,182,212,0.6)_360deg)]"
+                      className={`absolute inset-0 ${isAlert ? 'bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(239,68,68,0.6)_360deg)]' : 'bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(6,182,212,0.6)_360deg)]'}`}
                     />
                     <div className="absolute inset-1 bg-neutral-950 rounded-full flex items-center justify-center">
-                      <div className={`w-32 h-32 rounded-full blur-2xl ${isSpeaking ? 'bg-cyan-300/60' : 'bg-cyan-600/30'}`} />
+                      <div className={`w-32 h-32 rounded-full blur-2xl ${isSpeaking ? (isAlert ? 'bg-red-300/60' : 'bg-cyan-300/60') : (isAlert ? 'bg-red-600/30' : 'bg-cyan-600/30')}`} />
                       <div className="relative flex items-center justify-center">
-                        <Hexagon className={`absolute w-16 h-16 ${isSpeaking ? 'text-cyan-100' : 'text-cyan-500/50'} animate-[spin_10s_linear_infinite]`} />
-                        <Aperture className={`absolute w-8 h-8 ${isSpeaking ? 'text-cyan-100' : 'text-cyan-500/50'} animate-[spin_4s_linear_infinite_reverse]`} />
+                        <Hexagon className={`absolute w-16 h-16 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_10s_linear_infinite]`} />
+                        <Aperture className={`absolute w-8 h-8 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_4s_linear_infinite_reverse]`} />
                       </div>
                     </div>
                   </div>
                 ) : connectionState === 'connecting' ? (
                   <div className="flex flex-col items-center gap-4">
-                    <Loader2 className="w-10 h-10 text-cyan-500 animate-spin" />
-                    <span className="font-mono text-xs text-cyan-500 tracking-widest">INITIALIZING</span>
+                    <Loader2 className={`w-10 h-10 ${isAlert ? 'text-red-500' : 'text-cyan-500'} animate-spin`} />
+                    <span className={`font-mono text-xs ${isAlert ? 'text-red-500' : 'text-cyan-500'} tracking-widest`}>INITIALIZING</span>
                   </div>
                 ) : (
                   <div className="relative flex items-center justify-center">
@@ -1131,12 +1315,12 @@ export default function App() {
                   key={statusText}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`text-2xl font-light tracking-[0.3em] ${connectionState === 'connected' ? 'text-cyan-100' : 'text-neutral-600'}`}
+                  className={`text-2xl font-light tracking-[0.3em] ${connectionState === 'connected' ? (isAlert ? 'text-red-100' : 'text-cyan-100') : 'text-neutral-600'}`}
                 >
                   {statusText}
                 </motion.p>
                 {connectionState === 'connected' && !isSpeaking && (
-                  <p className="text-xs font-mono text-cyan-500/60 mt-3 animate-pulse tracking-widest">
+                  <p className={`text-xs font-mono ${isAlert ? 'text-red-500/60' : 'text-cyan-500/60'} mt-3 animate-pulse tracking-widest`}>
                     AWAITING VOICE INPUT...
                   </p>
                 )}
@@ -1152,7 +1336,7 @@ export default function App() {
               className={`flex items-center gap-3 px-10 py-4 rounded-none border font-mono text-sm tracking-widest transition-all ${
                 connectionState === 'connected' 
                   ? 'bg-red-950/30 text-red-400 hover:bg-red-900/40 border-red-500/30' 
-                  : 'bg-cyan-950/30 text-cyan-400 hover:bg-cyan-900/40 border-cyan-500/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)] disabled:opacity-50 disabled:cursor-not-allowed'
+                  : `${isAlert ? 'bg-red-950/30 text-red-400 hover:bg-red-900/40 border-red-500/30 hover:shadow-[0_0_20px_rgba(239,68,68,0.2)]' : 'bg-cyan-950/30 text-cyan-400 hover:bg-cyan-900/40 border-cyan-500/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]'} disabled:opacity-50 disabled:cursor-not-allowed`
               }`}
             >
               {connectionState === 'connected' ? (
@@ -1182,68 +1366,72 @@ export default function App() {
           animate={{ 
             scale: focusedElement === 'tasks' ? 1.1 : 1,
             zIndex: focusedElement === 'tasks' ? 50 : 20,
-            boxShadow: focusedElement === 'tasks' ? '0 0 50px rgba(6,182,212,0.2)' : 'none'
+            boxShadow: focusedElement === 'tasks' ? (isAlert ? '0 0 50px rgba(239,68,68,0.2)' : '0 0 50px rgba(6,182,212,0.2)') : 'none'
           }}
-          className="w-80 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500 absolute right-0 top-0 bottom-0 cursor-move"
+          className={`w-80 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500 absolute right-0 top-0 bottom-0 cursor-move`}
         >
           
           {/* Next Execution Widget */}
-          <div className="p-6 border-b border-cyan-900/50 bg-cyan-950/20">
-            <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">NEXT EXECUTION</h3>
+          <div className={`p-6 border-b ${borderColor} ${isAlert ? 'bg-red-950/20' : 'bg-cyan-950/20'}`}>
+            <h3 className={`font-mono text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} mb-3 tracking-widest`}>NEXT EXECUTION</h3>
             {nextTask ? (
-              <div className="border border-cyan-500/50 bg-cyan-900/20 p-4 rounded relative overflow-hidden">
-                <div className="absolute top-0 left-0 w-1 h-full bg-cyan-500" />
-                <div className="flex items-center gap-2 text-cyan-300 font-mono text-xl mb-1">
+              <div className={`border ${isAlert ? 'border-red-500/50 bg-red-900/20' : 'border-cyan-500/50 bg-cyan-900/20'} p-4 rounded relative overflow-hidden`}>
+                <div className={`absolute top-0 left-0 w-1 h-full ${isAlert ? 'bg-red-500' : 'bg-cyan-500'}`} />
+                <div className={`flex items-center gap-2 ${isAlert ? 'text-red-300' : 'text-cyan-300'} font-mono text-xl mb-1`}>
                   <Bell className="w-5 h-5" />
                   {nextTask.time}
                 </div>
-                <p className="text-sm text-cyan-100 truncate">{nextTask.text}</p>
+                <p className={`text-sm ${isAlert ? 'text-red-100' : 'text-cyan-100'} truncate`}>{nextTask.text}</p>
               </div>
             ) : (
-              <div className="border border-cyan-900/50 bg-neutral-900/50 p-4 rounded text-center">
-                <p className="text-xs font-mono text-cyan-700">NO SCHEDULED EXECUTIONS</p>
+              <div className={`border ${isAlert ? 'border-red-900/50 bg-neutral-900/50' : 'border-cyan-900/50 bg-neutral-900/50'} p-4 rounded text-center`}>
+                <p className={`text-xs font-mono ${isAlert ? 'text-red-700' : 'text-cyan-700'}`}>NO SCHEDULED EXECUTIONS</p>
               </div>
             )}
           </div>
 
-          <div className="p-6 border-b border-cyan-900/50">
+          <div className={`p-6 border-b ${borderColor}`}>
             <div className="flex items-center gap-3">
-              <Clock className="w-5 h-5 text-cyan-400" />
-              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400">SCHEDULE & TASKS</h2>
+              <Clock className={`w-5 h-5 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+              <h2 className={`font-mono font-bold tracking-widest text-sm ${isAlert ? 'text-red-400' : 'text-cyan-400'}`}>SCHEDULE & TASKS</h2>
             </div>
           </div>
           <div className="p-6 flex-1 overflow-y-auto custom-scrollbar">
             <div className="space-y-4">
               {tasks.length === 0 ? (
-                <p className="text-xs font-mono text-cyan-700">No active tasks.</p>
+                <p className={`text-xs font-mono ${isAlert ? 'text-red-700' : 'text-cyan-700'}`}>No active tasks.</p>
               ) : (
                 tasks.map(task => (
                   <motion.div 
                     initial={{ opacity: 0, x: 20 }}
                     animate={{ opacity: 1, x: 0 }}
                     key={task.id} 
-                    className={`flex flex-col gap-2 p-3 rounded border ${task.done ? 'bg-cyan-950/20 border-cyan-900/30' : 'bg-cyan-900/10 border-cyan-500/30'}`}
+                    className={`flex flex-col gap-2 p-3 rounded border ${task.done ? (isAlert ? 'bg-red-950/20 border-red-900/30' : 'bg-cyan-950/20 border-cyan-900/30') : (isAlert ? 'bg-red-900/10 border-red-500/30' : 'bg-cyan-900/10 border-cyan-500/30')}`}
                   >
                     <div className="flex items-start gap-3">
                       <button 
                         onClick={() => {
                           playSfx('task_action');
-                          setTasks(prev => prev.map(t => t.id === task.id ? { ...t, done: !t.done } : t));
+                          if (userId) {
+                            setDoc(doc(db, `users/${userId}/tasks/${task.id}`), { ...task, done: !task.done }, { merge: true }).catch(console.error);
+                          } else {
+                            setTasks(prev => prev.map(t => t.id === task.id ? { ...t, done: !t.done } : t));
+                          }
                         }}
                         className="mt-0.5 shrink-0 cursor-pointer"
                       >
                         {task.done ? (
-                          <CheckSquare className="w-4 h-4 text-cyan-600" />
+                          <CheckSquare className={`w-4 h-4 ${isAlert ? 'text-red-600' : 'text-cyan-600'}`} />
                         ) : (
-                          <Square className="w-4 h-4 text-cyan-400" />
+                          <Square className={`w-4 h-4 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
                         )}
                       </button>
-                      <span className={`text-sm ${task.done ? 'text-cyan-700 line-through' : 'text-cyan-100'}`}>
+                      <span className={`text-sm ${task.done ? (isAlert ? 'text-red-700 line-through' : 'text-cyan-700 line-through') : (isAlert ? 'text-red-100' : 'text-cyan-100')}`}>
                         {task.text}
                       </span>
                     </div>
                     {task.time && (
-                      <div className="flex items-center gap-1.5 ml-7 text-xs font-mono text-cyan-600">
+                      <div className={`flex items-center gap-1.5 ml-7 text-xs font-mono ${isAlert ? 'text-red-600' : 'text-cyan-600'}`}>
                         <Clock className="w-3 h-3" />
                         <span>{task.time}</span>
                       </div>
@@ -1259,30 +1447,30 @@ export default function App() {
           drag
           dragMomentum={false}
           initial={{ x: 350, y: 100 }}
-          className="w-72 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30"
+          className={`w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30`}
         >
-          <div className="p-4 border-b border-cyan-900/50">
+          <div className={`p-4 border-b ${borderColor}`}>
             <div className="flex items-center gap-2 mb-2">
-              <Cloud className="w-4 h-4 text-cyan-400" />
-              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400">ATMOSPHERICS</h2>
+              <Cloud className={`w-4 h-4 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+              <h2 className={`font-mono font-bold tracking-widest text-sm ${isAlert ? 'text-red-400' : 'text-cyan-400'}`}>ATMOSPHERICS</h2>
             </div>
             <div className="flex items-end gap-4 mt-4">
-              <div className="text-4xl font-light text-cyan-100">{weatherData.current.temp}°C</div>
+              <div className={`text-4xl font-light ${isAlert ? 'text-red-100' : 'text-cyan-100'}`}>{weatherData.current.temp}°C</div>
               <div className="pb-1">
-                <div className="text-sm text-cyan-300">{weatherData.current.condition}</div>
-                <div className="text-xs text-cyan-600 font-mono">HUMIDITY: {weatherData.current.humidity}%</div>
+                <div className={`text-sm ${isAlert ? 'text-red-300' : 'text-cyan-300'}`}>{weatherData.current.condition}</div>
+                <div className={`text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} font-mono`}>HUMIDITY: {weatherData.current.humidity}%</div>
               </div>
             </div>
           </div>
-          <div className="p-4 bg-cyan-950/20">
-            <h3 className="font-mono text-xs text-cyan-600 mb-3 tracking-widest">72-HOUR FORECAST</h3>
+          <div className={`p-4 ${isAlert ? 'bg-red-950/20' : 'bg-cyan-950/20'}`}>
+            <h3 className={`font-mono text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} mb-3 tracking-widest`}>72-HOUR FORECAST</h3>
             <div className="space-y-2">
               {weatherData.forecast.map((day, i) => (
-                <div key={i} className="flex justify-between items-center text-sm font-mono border-b border-cyan-900/30 pb-2 last:border-0 last:pb-0">
-                  <span className="text-cyan-500">{day.day}</span>
+                <div key={i} className={`flex justify-between items-center text-sm font-mono border-b ${isAlert ? 'border-red-900/30' : 'border-cyan-900/30'} pb-2 last:border-0 last:pb-0`}>
+                  <span className={isAlert ? 'text-red-500' : 'text-cyan-500'}>{day.day}</span>
                   <div className="flex items-center gap-3">
-                    <span className="text-cyan-300">{day.condition}</span>
-                    <span className="text-cyan-100 w-8 text-right">{day.temp}°</span>
+                    <span className={isAlert ? 'text-red-300' : 'text-cyan-300'}>{day.condition}</span>
+                    <span className={`w-8 text-right ${isAlert ? 'text-red-100' : 'text-cyan-100'}`}>{day.temp}°</span>
                   </div>
                 </div>
               ))}
@@ -1295,61 +1483,61 @@ export default function App() {
           drag
           dragMomentum={false}
           initial={{ x: 350, y: 450 }}
-          className="w-72 border border-cyan-900/50 bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30"
+          className={`w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30`}
         >
-          <div className="p-4 border-b border-cyan-900/50">
+          <div className={`p-4 border-b ${borderColor}`}>
             <div className="flex items-center gap-2 mb-2">
-              <Thermometer className="w-4 h-4 text-cyan-400" />
-              <h2 className="font-mono font-bold tracking-widest text-sm text-cyan-400">ENVIRONMENT</h2>
+              <Thermometer className={`w-4 h-4 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+              <h2 className={`font-mono font-bold tracking-widest text-sm ${isAlert ? 'text-red-400' : 'text-cyan-400'}`}>ENVIRONMENT</h2>
             </div>
           </div>
           <div className="p-4 grid grid-cols-2 gap-4">
-            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+            <div className={`${isAlert ? 'bg-red-950/30 border-red-900/50' : 'bg-cyan-950/30 border-cyan-900/50'} p-3 rounded border`}>
               <div className="flex items-center gap-2 mb-1">
-                <Thermometer className="w-3 h-3 text-cyan-600" />
-                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">TEMP</span>
+                <Thermometer className={`w-3 h-3 ${isAlert ? 'text-red-600' : 'text-cyan-600'}`} />
+                <span className={`text-[10px] font-mono ${isAlert ? 'text-red-600' : 'text-cyan-600'} tracking-widest`}>TEMP</span>
               </div>
-              <div className="text-lg text-cyan-300 font-mono">{roomConditions.temp}°C</div>
+              <div className={`text-lg ${isAlert ? 'text-red-300' : 'text-cyan-300'} font-mono`}>{roomConditions.temp}°C</div>
             </div>
-            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+            <div className={`${isAlert ? 'bg-red-950/30 border-red-900/50' : 'bg-cyan-950/30 border-cyan-900/50'} p-3 rounded border`}>
               <div className="flex items-center gap-2 mb-1">
-                <Droplets className="w-3 h-3 text-cyan-600" />
-                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">HUMIDITY</span>
+                <Droplets className={`w-3 h-3 ${isAlert ? 'text-red-600' : 'text-cyan-600'}`} />
+                <span className={`text-[10px] font-mono ${isAlert ? 'text-red-600' : 'text-cyan-600'} tracking-widest`}>HUMIDITY</span>
               </div>
-              <div className="text-lg text-cyan-300 font-mono">{roomConditions.humidity}%</div>
+              <div className={`text-lg ${isAlert ? 'text-red-300' : 'text-cyan-300'} font-mono`}>{roomConditions.humidity}%</div>
             </div>
-            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+            <div className={`${isAlert ? 'bg-red-950/30 border-red-900/50' : 'bg-cyan-950/30 border-cyan-900/50'} p-3 rounded border`}>
               <div className="flex items-center gap-2 mb-1">
-                <Wind className="w-3 h-3 text-cyan-600" />
-                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">AQI</span>
+                <Wind className={`w-3 h-3 ${isAlert ? 'text-red-600' : 'text-cyan-600'}`} />
+                <span className={`text-[10px] font-mono ${isAlert ? 'text-red-600' : 'text-cyan-600'} tracking-widest`}>AQI</span>
               </div>
-              <div className="text-lg text-green-400 font-mono">{roomConditions.aqi}</div>
+              <div className={`text-lg ${isAlert ? 'text-red-400' : 'text-green-400'} font-mono`}>{roomConditions.aqi}</div>
             </div>
-            <div className="bg-cyan-950/30 p-3 rounded border border-cyan-900/50">
+            <div className={`${isAlert ? 'bg-red-950/30 border-red-900/50' : 'bg-cyan-950/30 border-cyan-900/50'} p-3 rounded border`}>
               <div className="flex items-center gap-2 mb-1">
-                <Activity className="w-3 h-3 text-cyan-600" />
-                <span className="text-[10px] font-mono text-cyan-600 tracking-widest">STATUS</span>
+                <Activity className={`w-3 h-3 ${isAlert ? 'text-red-600' : 'text-cyan-600'}`} />
+                <span className={`text-[10px] font-mono ${isAlert ? 'text-red-600' : 'text-cyan-600'} tracking-widest`}>STATUS</span>
               </div>
-              <div className="text-sm text-cyan-300 font-mono mt-1">{roomConditions.status}</div>
+              <div className={`text-sm ${isAlert ? 'text-red-300' : 'text-cyan-300'} font-mono mt-1`}>{roomConditions.status}</div>
             </div>
           </div>
         </motion.aside>
       </motion.div>
 
       {/* Bottom Taskbar (Traffic Bar) */}
-      <div className="h-12 border-t border-cyan-900/50 bg-neutral-950/90 backdrop-blur-md flex items-center px-6 gap-4 z-20 overflow-x-auto custom-scrollbar">
-        <div className="flex items-center gap-2 border-r border-cyan-900/50 pr-4 shrink-0">
-          <Monitor className="w-4 h-4 text-cyan-600" />
-          <span className="font-mono text-xs text-cyan-600 tracking-widest">RUNNING APPS</span>
+      <div className={`h-12 border-t ${borderColor} bg-neutral-950/90 backdrop-blur-md flex items-center px-6 gap-4 z-20 overflow-x-auto custom-scrollbar`}>
+        <div className={`flex items-center gap-2 border-r ${borderColor} pr-4 shrink-0`}>
+          <Monitor className={`w-4 h-4 ${isAlert ? 'text-red-600' : 'text-cyan-600'}`} />
+          <span className={`font-mono text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} tracking-widest`}>RUNNING APPS</span>
         </div>
         <div className="flex gap-2">
           {runningApps.map((app, i) => (
-            <div key={i} className="px-3 py-1 bg-cyan-950/30 border border-cyan-900/50 rounded text-xs font-mono text-cyan-300 whitespace-nowrap">
+            <div key={i} className={`px-3 py-1 ${isAlert ? 'bg-red-950/30 border-red-900/50 text-red-300' : 'bg-cyan-950/30 border-cyan-900/50 text-cyan-300'} border rounded text-xs font-mono whitespace-nowrap`}>
               {app}
             </div>
           ))}
           {runningApps.length === 0 && (
-            <span className="text-xs font-mono text-cyan-800">No data available (Sandbox Mode)</span>
+            <span className={`text-xs font-mono ${isAlert ? 'text-red-800' : 'text-cyan-800'}`}>No data available (Sandbox Mode)</span>
           )}
         </div>
       </div>

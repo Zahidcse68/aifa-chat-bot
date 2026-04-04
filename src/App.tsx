@@ -180,6 +180,35 @@ export default function App() {
   const [isUnlocked, setIsUnlocked] = useState(false);
   const [authStatus, setAuthStatus] = useState<'locked' | 'scanning_face' | 'failed' | 'setup_face' | 'setup_done'>('locked');
 
+  const [isCameraOpen, setIsCameraOpen] = useState(false);
+  const isCameraOpenRef = useRef(false);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState('');
+  const hudVideoRef = useRef<HTMLVideoElement>(null);
+  const hudCanvasRef = useRef<HTMLCanvasElement>(null);
+  const videoStreamRef = useRef<MediaStream | null>(null);
+
+  useEffect(() => {
+    isCameraOpenRef.current = isCameraOpen;
+    if (isCameraOpen) {
+      navigator.mediaDevices.getUserMedia({ video: true }).then(stream => {
+        videoStreamRef.current = stream;
+        if (hudVideoRef.current) {
+          hudVideoRef.current.srcObject = stream;
+          hudVideoRef.current.play();
+        }
+      }).catch(err => {
+        console.error("Camera error:", err);
+        setIsCameraOpen(false);
+      });
+    } else {
+      if (videoStreamRef.current) {
+        videoStreamRef.current.getTracks().forEach(t => t.stop());
+        videoStreamRef.current = null;
+      }
+    }
+  }, [isCameraOpen]);
+
   // System State
   const [systemStatus, setSystemStatus] = useState<'Locked' | 'Authorized' | 'Processing' | 'Alert'>('Locked');
   const [userId, setUserId] = useState<string | null>(null);
@@ -260,7 +289,7 @@ export default function App() {
   useEffect(() => {
     const loadModels = async () => {
       try {
-        const MODEL_URL = 'https://vladmandic.github.io/face-api/model/';
+        const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
         await Promise.all([
           faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
           faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
@@ -591,6 +620,28 @@ export default function App() {
                 },
                 required: ['status']
               }
+            },
+            {
+              name: 'toggleCamera',
+              description: 'Open or close the live camera feed so you can see the user.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  action: { type: Type.STRING, description: 'open or close' }
+                },
+                required: ['action']
+              }
+            },
+            {
+              name: 'toggleChat',
+              description: 'Open or close the text chat box for the user to type messages.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  action: { type: Type.STRING, description: 'open or close' }
+                },
+                required: ['action']
+              }
             }
           ]
         }
@@ -616,8 +667,8 @@ export default function App() {
           voiceConfig: { prebuiltVoiceConfig: { voiceName: 'Kore' } },
         },
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can log him out via 'logoutSystem'. You will receive real-time video frames from the webcam. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', and log him out via 'logoutSystem'. You will receive real-time video frames from the webcam. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera' and open/close the text chat via 'toggleChat'. You can log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', and log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
         tools: tools,
       };
 
@@ -668,9 +719,9 @@ export default function App() {
 
             // Start video frame capture
             const videoInterval = setInterval(() => {
-              if (!isConnectedRef.current || !videoRef.current || !canvasRef.current) return;
-              const video = videoRef.current;
-              const canvas = canvasRef.current;
+              if (!isConnectedRef.current || !isCameraOpenRef.current || !hudVideoRef.current || !hudCanvasRef.current) return;
+              const video = hudVideoRef.current;
+              const canvas = hudCanvasRef.current;
               if (video.readyState >= 2) {
                 canvas.width = video.videoWidth;
                 canvas.height = video.videoHeight;
@@ -876,6 +927,46 @@ export default function App() {
                       });
                     });
                   }
+
+                  // TOGGLE CAMERA
+                  if (call.name === 'toggleCamera') {
+                    const { action } = call.args;
+                    const isOpen = action === 'open';
+                    setIsCameraOpen(isOpen);
+                    addLog(`[SYS] Camera ${isOpen ? 'opened' : 'closed'}`);
+                    playSfx('task_action');
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Camera ${isOpen ? 'opened' : 'closed'}.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  // TOGGLE CHAT
+                  if (call.name === 'toggleChat') {
+                    const { action } = call.args;
+                    const isOpen = action === 'open';
+                    setIsChatOpen(isOpen);
+                    addLog(`[SYS] Chat ${isOpen ? 'opened' : 'closed'}`);
+                    playSfx('task_action');
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Chat ${isOpen ? 'opened' : 'closed'}.` }
+                        }]
+                      });
+                    });
+                  }
                   
                   // SYSTEM COMMANDS
                   if (call.name === 'executeSystemCommand') {
@@ -957,6 +1048,11 @@ export default function App() {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
     }
+    if (videoStreamRef.current) {
+      videoStreamRef.current.getTracks().forEach(track => track.stop());
+      videoStreamRef.current = null;
+    }
+    setIsCameraOpen(false);
     fadeOutAndStopAllAudio();
     setStatusText('SYSTEM STANDBY');
     setHudTransform({ scale: 1, x: 0, y: 0 });
@@ -1522,6 +1618,80 @@ export default function App() {
             </div>
           </div>
         </motion.aside>
+
+        {/* Live Camera Panel */}
+        <AnimatePresence>
+          {isCameraOpen && (
+            <motion.aside
+              drag
+              dragMomentum={false}
+              initial={{ opacity: 0, scale: 0.8, x: 50, y: 50 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.8 }}
+              className={`w-64 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-40`}
+            >
+              <div className={`p-2 border-b ${borderColor} flex justify-between items-center`}>
+                <div className="flex items-center gap-2">
+                  <div className="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+                  <h2 className={`font-mono font-bold tracking-widest text-xs ${isAlert ? 'text-red-400' : 'text-cyan-400'}`}>LIVE FEED</h2>
+                </div>
+                <button onClick={() => setIsCameraOpen(false)} className={`text-xs ${isAlert ? 'text-red-600 hover:text-red-400' : 'text-cyan-600 hover:text-cyan-400'}`}>
+                  [X]
+                </button>
+              </div>
+              <div className="p-2">
+                <div className={`relative w-full aspect-video border ${borderColor} bg-black overflow-hidden rounded`}>
+                  <video ref={hudVideoRef} className="w-full h-full object-cover" autoPlay muted playsInline />
+                  <canvas ref={hudCanvasRef} className="hidden" />
+                </div>
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
+
+        {/* Text Chat Panel */}
+        <AnimatePresence>
+          {isChatOpen && (
+            <motion.aside
+              drag
+              dragMomentum={false}
+              initial={{ opacity: 0, scale: 0.8, x: 50, y: 300 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.8 }}
+              className={`w-80 border ${borderColor} bg-neutral-950/90 backdrop-blur-md flex flex-col absolute cursor-move z-40`}
+            >
+              <div className={`p-2 border-b ${borderColor} flex justify-between items-center`}>
+                <div className="flex items-center gap-2">
+                  <Terminal className={`w-3 h-3 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+                  <h2 className={`font-mono font-bold tracking-widest text-xs ${isAlert ? 'text-red-400' : 'text-cyan-400'}`}>TEXT COMM</h2>
+                </div>
+                <button onClick={() => setIsChatOpen(false)} className={`text-xs ${isAlert ? 'text-red-600 hover:text-red-400' : 'text-cyan-600 hover:text-cyan-400'}`}>
+                  [X]
+                </button>
+              </div>
+              <div className="p-4">
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!chatInput.trim() || !sessionRef.current) return;
+                  sessionRef.current.sendRealtimeInput([{ text: chatInput }]);
+                  addLog(`[USER] ${chatInput}`);
+                  setChatInput('');
+                }} className="flex gap-2">
+                  <input
+                    type="text"
+                    value={chatInput}
+                    onChange={(e) => setChatInput(e.target.value)}
+                    placeholder="Type message..."
+                    className={`flex-1 bg-black/50 border ${borderColor} rounded px-3 py-2 text-sm font-mono ${isAlert ? 'text-red-300 placeholder-red-800' : 'text-cyan-300 placeholder-cyan-800'} focus:outline-none focus:border-cyan-400`}
+                  />
+                  <button type="submit" className={`px-3 py-2 border ${borderColor} rounded text-xs font-mono ${isAlert ? 'text-red-400 hover:bg-red-900/30' : 'text-cyan-400 hover:bg-cyan-900/30'}`}>
+                    SEND
+                  </button>
+                </form>
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
       </motion.div>
 
       {/* Bottom Taskbar (Traffic Bar) */}

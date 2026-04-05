@@ -183,8 +183,16 @@ export default function App() {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const isCameraOpenRef = useRef(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState('');
-  const [chatMessages, setChatMessages] = useState<{sender: 'user'|'aifa', text: string}[]>([]);
+  const [chatMessages, setChatMessages] = useState<{sender: 'user'|'aifa', text: string, isFinished?: boolean}[]>(() => {
+    const saved = localStorage.getItem('aifa_chat_history');
+    return saved ? JSON.parse(saved) : [];
+  });
+
+  useEffect(() => {
+    localStorage.setItem('aifa_chat_history', JSON.stringify(chatMessages));
+  }, [chatMessages]);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const hudVideoRef = useRef<HTMLVideoElement>(null);
@@ -328,36 +336,40 @@ export default function App() {
     }
 
     const timer = setInterval(() => {
-      const now = new Date();
-      setTime(now);
-      
-      // Check for alarms
-      const currentTimeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
-      
-      setTasks(prev => {
-        let changed = false;
-        const newTasks = prev.map(t => {
-          if (t.time === currentTimeStr && !t.done && !t.alarmTriggered) {
-            changed = true;
-            playSfx('alarm');
-            setActiveAlarm(t.text);
-            setTimeout(() => setActiveAlarm(null), 5000);
-            
-            // Notify Aifa about the alarm if connected, otherwise speak locally
-            if (isConnectedRef.current && sessionRef.current) {
-              sessionRef.current.sendRealtimeInput([{
-                text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}". Please announce this to the user immediately.`
-              }]);
-            } else {
-              speakText(`Master, reminder: ${t.text}`);
-            }
+      try {
+        const now = new Date();
+        setTime(now);
+        
+        // Check for alarms
+        const currentTimeStr = now.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
+        
+        setTasks(prev => {
+          let changed = false;
+          const newTasks = prev.map(t => {
+            if (t.time === currentTimeStr && !t.done && !t.alarmTriggered) {
+              changed = true;
+              playSfx('alarm');
+              setActiveAlarm(t.text);
+              setTimeout(() => setActiveAlarm(null), 5000);
+              
+              // Notify Aifa about the alarm if connected, otherwise speak locally
+              if (isConnectedRef.current && sessionRef.current) {
+                sessionRef.current.sendRealtimeInput([{
+                  text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}". Please announce this to the user immediately.`
+                }]);
+              } else {
+                speakText(`Master, reminder: ${t.text}`);
+              }
 
-            return { ...t, alarmTriggered: true };
-          }
-          return t;
+              return { ...t, alarmTriggered: true };
+            }
+            return t;
+          });
+          return changed ? newTasks : prev;
         });
-        return changed ? newTasks : prev;
-      });
+      } catch (err) {
+        console.error("Timer error:", err);
+      }
     }, 1000);
     
     fetch('https://api.ipify.org?format=json')
@@ -416,7 +428,7 @@ export default function App() {
       }
       
       let scanCount = 0;
-      const maxScans = isSetup ? 3 : 1; // 3 scans for setup, 1 for login
+      const maxScans = isSetup ? 3 : 1; // 3 scans for setup
       const descriptors: Float32Array[] = [];
       let isScanning = true;
       let scanTimeout: any = null;
@@ -429,59 +441,65 @@ export default function App() {
             const detection = await faceapi.detectSingleFace(videoRef.current, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
             
             if (detection) {
-              descriptors.push(detection.descriptor);
-              scanCount++;
-              if (isSetup && scanCount < maxScans) {
-                 speakText(`Face captured. ${maxScans - scanCount} remaining.`);
-              }
-            } else {
-               if (isSetup) speakText("No face detected. Please look at the camera.");
-            }
-
-            if (scanCount >= maxScans) {
-              isScanning = false;
-              stream.getTracks().forEach(track => track.stop());
-
               if (isSetup) {
-                // Save the first descriptor as an array
-                const descriptorArray = Array.from(descriptors[0]);
-                localStorage.setItem('aifa_user_face_descriptor', JSON.stringify(descriptorArray));
-                localStorage.setItem('aifa_user_face', 'enrolled');
-                setUserFaceData('enrolled');
-                if (userId) {
-                  setDoc(doc(db, `users/${userId}/preferences/default`), { faceEnrolled: true }, { merge: true }).catch(console.error);
+                descriptors.push(detection.descriptor);
+                scanCount++;
+                if (scanCount < maxScans) {
+                   speakText(`Face captured. ${maxScans - scanCount} remaining.`);
                 }
-                playSfx('boot');
-                setAuthStatus('setup_done');
-                speakText("Setup complete. Login now with your face.", () => {
-                  setIsSetupComplete(true);
-                  setAuthStatus('locked');
-                });
               } else {
+                // Login mode: check immediately
                 const savedDescriptorStr = localStorage.getItem('aifa_user_face_descriptor');
                 if (savedDescriptorStr) {
                   const savedDescriptor = new Float32Array(JSON.parse(savedDescriptorStr));
-                  const distance = faceapi.euclideanDistance(descriptors[0], savedDescriptor);
+                  const distance = faceapi.euclideanDistance(detection.descriptor, savedDescriptor);
                   if (distance < 0.5) { // Threshold for match
+                    isScanning = false;
+                    stream.getTracks().forEach(track => track.stop());
                     playSfx('auth_success');
                     setIsUnlocked(true);
                     setSystemStatus('Authorized');
                     speakText(`Welcome back, Master. Initializing Aifa core.`);
+                    return; // End the loop
                   } else {
-                    playSfx('auth_fail');
-                    setAuthStatus('failed');
+                    // Mismatch, but keep trying
                     setSystemStatus('Alert');
-                    speakText("Wrong face detected. Access denied.");
-                    setTimeout(() => { setAuthStatus('locked'); setSystemStatus('Locked'); }, 2000);
+                    // Don't change authStatus to 'failed' so the video stays mounted
                   }
                 } else {
+                   isScanning = false;
+                   stream.getTracks().forEach(track => track.stop());
                    playSfx('auth_fail');
                    setAuthStatus('failed');
                    setSystemStatus('Alert');
                    speakText("No enrolled face found.");
                    setTimeout(() => { setAuthStatus('locked'); setSystemStatus('Locked'); }, 2000);
+                   return;
                 }
               }
+            } else {
+               if (isSetup) speakText("No face detected. Please look at the camera.");
+               else setAuthStatus('scanning_face'); // Reset to scanning visual
+            }
+
+            if (isSetup && scanCount >= maxScans) {
+              isScanning = false;
+              stream.getTracks().forEach(track => track.stop());
+
+              // Save the first descriptor as an array
+              const descriptorArray = Array.from(descriptors[0]);
+              localStorage.setItem('aifa_user_face_descriptor', JSON.stringify(descriptorArray));
+              localStorage.setItem('aifa_user_face', 'enrolled');
+              setUserFaceData('enrolled');
+              if (userId) {
+                setDoc(doc(db, `users/${userId}/preferences/default`), { faceEnrolled: true }, { merge: true }).catch(console.error);
+              }
+              playSfx('boot');
+              setAuthStatus('setup_done');
+              speakText("Setup complete. Login now with your face.", () => {
+                setIsSetupComplete(true);
+                setAuthStatus('locked');
+              });
               return; // End the loop
             }
           } catch (err) {
@@ -490,7 +508,7 @@ export default function App() {
         }
         
         if (isScanning) {
-          scanTimeout = setTimeout(performScan, 1500);
+          scanTimeout = setTimeout(performScan, 1000); // Check every second
         }
       };
 
@@ -680,6 +698,37 @@ export default function App() {
                 },
                 required: ['command']
               }
+            },
+            {
+              name: 'openBrowser',
+              description: 'Open a built-in browser to a specific URL. Use this to show websites, maps, or search results.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  url: { type: Type.STRING, description: 'The URL to open, e.g., https://www.google.com' }
+                },
+                required: ['url']
+              }
+            },
+            {
+              name: 'closeBrowser',
+              description: 'Close the built-in browser.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {}
+              }
+            },
+            {
+              name: 'sendWhatsApp',
+              description: 'Send a WhatsApp message to a specific phone number.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  phone: { type: Type.STRING, description: 'The phone number to send the message to, including country code (e.g., +1234567890)' },
+                  text: { type: Type.STRING, description: 'The message text to send' }
+                },
+                required: ['phone', 'text']
+              }
             }
           ]
         }
@@ -707,8 +756,8 @@ export default function App() {
         outputAudioTranscription: {},
         inputAudioTranscription: {},
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can open a built-in browser via 'openBrowser' to show websites or maps. You can close the browser via 'closeBrowser'. You can send WhatsApp messages via 'sendWhatsApp'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can open a built-in browser via 'openBrowser' to show websites or maps. You can close the browser via 'closeBrowser'. You can send WhatsApp messages via 'sendWhatsApp'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
         tools: tools,
       };
 
@@ -786,14 +835,60 @@ export default function App() {
           onmessage: async (message: LiveServerMessage) => {
             if (!isConnectedRef.current) return;
 
-            // Handle Text Output
+            // Handle Text Output (if any)
             const parts = message.serverContent?.modelTurn?.parts;
             if (parts) {
               for (const part of parts) {
                 if (part.text) {
-                  setChatMessages(prev => [...prev, { sender: 'aifa', text: part.text as string }]);
+                  setChatMessages(prev => {
+                    const last = prev[prev.length - 1];
+                    if (last && last.sender === 'aifa' && !last.isFinished) {
+                      return [...prev.slice(0, -1), { ...last, text: last.text + part.text }];
+                    } else {
+                      return [...prev, { sender: 'aifa', text: part.text as string, isFinished: false }];
+                    }
+                  });
                 }
               }
+            }
+
+            // Handle Transcriptions
+            if (message.serverContent?.outputTranscription) {
+              const text = message.serverContent.outputTranscription.text || '';
+              if (text) {
+                setChatMessages(prev => {
+                  const last = prev[prev.length - 1];
+                  if (last && last.sender === 'aifa' && !last.isFinished) {
+                    return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+                  } else {
+                    return [...prev, { sender: 'aifa', text: text, isFinished: false }];
+                  }
+                });
+              }
+            }
+
+            if (message.serverContent?.inputTranscription) {
+              const text = message.serverContent.inputTranscription.text || '';
+              if (text) {
+                setChatMessages(prev => {
+                  const last = prev[prev.length - 1];
+                  if (last && last.sender === 'user' && !last.isFinished) {
+                    return [...prev.slice(0, -1), { ...last, text: last.text + text }];
+                  } else {
+                    return [...prev, { sender: 'user', text: text, isFinished: false }];
+                  }
+                });
+              }
+            }
+
+            if (message.serverContent?.turnComplete) {
+              setChatMessages(prev => {
+                const last = prev[prev.length - 1];
+                if (last && !last.isFinished) {
+                  return [...prev.slice(0, -1), { ...last, isFinished: true }];
+                }
+                return prev;
+              });
             }
 
             // Handle Audio Playback
@@ -853,12 +948,13 @@ export default function App() {
                   // TASK MANAGEMENT
                   if (call.name === 'manageTasks') {
                     const { action, taskText, taskId, time: scheduledTime } = call.args;
-                    addLog(`[TASK] ${action.toUpperCase()}: ${taskText || taskId || 'all'}`);
+                    const actionStr = action as string;
+                    addLog(`[TASK] ${actionStr.toUpperCase()}: ${taskText || taskId || 'all'}`);
                     playSfx('task_action');
                     
-                    let responseMsg = `Task ${action} successful.`;
+                    let responseMsg = `Task ${actionStr} successful.`;
                     
-                    if (action === 'add' && taskText) {
+                    if (actionStr === 'add' && taskText) {
                       const newId = Date.now();
                       const newTask = { id: newId, text: taskText as string, done: false, time: scheduledTime as string || '' };
                       if (userId) {
@@ -1055,6 +1151,71 @@ export default function App() {
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Command ${command} sent successfully.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  if (call.name === 'openBrowser') {
+                    const { url } = call.args;
+                    addLog(`[BROWSER] Opening ${url}`);
+                    setBrowserUrl(url as string);
+                    playSfx('task_action');
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Browser opened to ${url}.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  if (call.name === 'closeBrowser') {
+                    addLog(`[BROWSER] Closing browser`);
+                    setBrowserUrl(null);
+                    playSfx('task_action');
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Browser closed.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  if (call.name === 'sendWhatsApp') {
+                    const { phone, text } = call.args;
+                    addLog(`[WHATSAPP] Sending message to ${phone}`);
+                    playSfx('task_action');
+                    
+                    if (isDesktop) {
+                      // Try to open WhatsApp app on desktop
+                      const isWin = navigator.userAgent.includes("Win");
+                      const cmd = isWin ? `start whatsapp://send?phone=${phone}&text=${encodeURIComponent(text as string)}` : `open "whatsapp://send?phone=${phone}&text=${encodeURIComponent(text as string)}"`;
+                      (window as any).electronAPI?.runCommand(cmd).catch(() => {
+                        // Fallback to browser
+                        setBrowserUrl(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`);
+                      });
+                    } else {
+                      // Open in built-in browser
+                      setBrowserUrl(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`);
+                    }
+
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `WhatsApp message initiated.` }
                         }]
                       });
                     });
@@ -1748,6 +1909,33 @@ export default function App() {
           )}
         </AnimatePresence>
 
+        {/* Browser Panel */}
+        <AnimatePresence>
+          {browserUrl && (
+            <motion.aside
+              drag
+              dragMomentum={false}
+              initial={{ opacity: 0, scale: 0.8, x: 50, y: 50 }}
+              animate={{ opacity: 1, scale: 1 }}
+              exit={{ opacity: 0, scale: 0.8 }}
+              className={`absolute left-10 top-20 w-[800px] h-[600px] z-50 bg-black/80 backdrop-blur-md border ${borderColor} rounded-lg shadow-[0_0_30px_rgba(6,182,212,0.2)] overflow-hidden flex flex-col`}
+            >
+              <div className={`p-2 border-b ${borderColor} bg-black/50 flex justify-between items-center cursor-move`}>
+                <div className="flex items-center gap-2">
+                  <Globe className={`w-4 h-4 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+                  <h2 className={`font-mono font-bold tracking-widest text-xs ${isAlert ? 'text-red-400' : 'text-cyan-400'} truncate max-w-[600px]`}>{browserUrl}</h2>
+                </div>
+                <button onClick={() => setBrowserUrl(null)} className={`text-xs ${isAlert ? 'text-red-600 hover:text-red-400' : 'text-cyan-600 hover:text-cyan-400'}`}>
+                  [X]
+                </button>
+              </div>
+              <div className="flex-1 bg-white">
+                <iframe src={browserUrl} className="w-full h-full border-none" title="Browser" sandbox="allow-same-origin allow-scripts allow-popups allow-forms" />
+              </div>
+            </motion.aside>
+          )}
+        </AnimatePresence>
+
         {/* Text Chat Panel */}
         <AnimatePresence>
           {isChatOpen && (
@@ -1785,7 +1973,7 @@ export default function App() {
                   e.preventDefault();
                   if (!chatInput.trim() || !sessionRef.current) return;
                   sessionRef.current.sendRealtimeInput([{ text: chatInput }]);
-                  setChatMessages(prev => [...prev, { sender: 'user', text: chatInput }]);
+                  setChatMessages(prev => [...prev, { sender: 'user', text: chatInput, isFinished: true }]);
                   addLog(`[USER] ${chatInput}`);
                   setChatInput('');
                 }} className="flex gap-2">

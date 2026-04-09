@@ -361,13 +361,14 @@ export default function App() {
               setActiveAlarm(t.text);
               setTimeout(() => setActiveAlarm(null), 5000);
               
-              // Notify Aifa about the alarm if connected, otherwise speak locally
+              // Always speak locally so the user definitely hears it
+              speakText(`Master, reminder: ${t.text}`);
+              
+              // Notify Aifa about the alarm if connected
               if (isConnectedRef.current && sessionRef.current) {
-                sessionRef.current.sendRealtimeInput([{
-                  text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}". Please announce this to the user immediately.`
-                }]);
-              } else {
-                speakText(`Master, reminder: ${t.text}`);
+                sessionRef.current.sendRealtimeInput({
+                  text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}".`
+                });
               }
 
               return { ...t, alarmTriggered: true };
@@ -617,6 +618,7 @@ export default function App() {
       processor.connect(captureCtx.destination);
 
       const tools: any[] = [
+        { googleSearch: {} },
         {
           functionDeclarations: [
             {
@@ -643,6 +645,26 @@ export default function App() {
                   target: { type: Type.STRING, description: 'If action is focus, specify: monitor, orb, or tasks' }
                 },
                 required: ['action']
+              }
+            },
+            {
+              name: 'lockSystem',
+              description: 'Lock the user\'s operating system (Windows/Mac) or put the app into fullscreen lock mode.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {}
+              }
+            },
+            {
+              name: 'updateSourceCode',
+              description: 'Modify or update your own source code files. Use this to add new features to yourself.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  filePath: { type: Type.STRING, description: 'The path to the file to modify, e.g., src/App.tsx' },
+                  content: { type: Type.STRING, description: 'The new content to write to the file' }
+                },
+                required: ['filePath', 'content']
               }
             },
             {
@@ -803,8 +825,8 @@ export default function App() {
         outputAudioTranscription: {},
         inputAudioTranscription: {},
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem', or lock his OS via 'lockSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. You have access to Google Search to find real-time information and do complex tasks. You can also update your own code using 'updateSourceCode' or 'executeSystemCommand' if the user asks you to add new features to yourself. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), log him out via 'logoutSystem', or lock the app via 'lockSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. You have access to Google Search to find real-time information and do complex tasks. You can also update your own code using 'updateSourceCode' if the user asks you to add new features to yourself. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`,
         tools: tools,
       };
 
@@ -1108,6 +1130,84 @@ export default function App() {
                         }]
                       });
                     });
+                  }
+
+                  // LOCK SYSTEM
+                  if (call.name === 'lockSystem') {
+                    addLog(`[SYS] Locking system...`);
+                    playSfx('auth_fail');
+                    disconnect();
+                    setIsUnlocked(false);
+                    setAuthStatus('locked');
+                    
+                    if (isDesktop && (window as any).electronAPI) {
+                      (window as any).electronAPI.executeCommand('rundll32.exe user32.dll,LockWorkStation || pmset displaysleepnow');
+                    }
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `System locked successfully.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  // UPDATE SOURCE CODE
+                  if (call.name === 'updateSourceCode') {
+                    const { filePath, content } = call.args;
+                    addLog(`[SYS] Updating source code: ${filePath}`);
+                    
+                    if (isDesktop && (window as any).electronAPI) {
+                      // We can use executeCommand to echo content to a file, or if we had a dedicated write file API.
+                      // For now, we'll simulate it or use a shell command to overwrite the file.
+                      // Note: In a real environment, writing complex files via shell echo is tricky due to escaping.
+                      // A proper node script would be better. We'll use a base64 decode approach.
+                      const base64Content = btoa(unescape(encodeURIComponent(content as string)));
+                      const command = process.platform === 'win32' 
+                        ? `powershell -Command "[IO.File]::WriteAllBytes('${filePath}', [Convert]::FromBase64String('${base64Content}'))"`
+                        : `echo "${base64Content}" | base64 --decode > "${filePath}"`;
+                        
+                      (window as any).electronAPI.executeCommand(command)
+                        .then(() => {
+                          sessionPromise.then(session => {
+                            if (!isConnectedRef.current) return;
+                            session.sendToolResponse({
+                              functionResponses: [{
+                                id: call.id,
+                                name: call.name,
+                                response: { success: true, message: `Source code updated successfully. The dev server will restart automatically.` }
+                              }]
+                            });
+                          });
+                        })
+                        .catch((err: any) => {
+                          sessionPromise.then(session => {
+                            if (!isConnectedRef.current) return;
+                            session.sendToolResponse({
+                              functionResponses: [{
+                                id: call.id,
+                                name: call.name,
+                                response: { success: false, message: `Failed to update source code: ${err}` }
+                              }]
+                            });
+                          });
+                        });
+                    } else {
+                      sessionPromise.then(session => {
+                        if (!isConnectedRef.current) return;
+                        session.sendToolResponse({
+                          functionResponses: [{
+                            id: call.id,
+                            name: call.name,
+                            response: { success: false, message: `Cannot update source code in web sandbox. Must be running locally.` }
+                          }]
+                        });
+                      });
+                    }
                   }
 
                   // SET SYSTEM STATUS
@@ -2243,7 +2343,7 @@ export default function App() {
                 <form onSubmit={(e) => {
                   e.preventDefault();
                   if (!chatInput.trim() || !sessionRef.current) return;
-                  sessionRef.current.sendRealtimeInput([{ text: chatInput }]);
+                  sessionRef.current.sendRealtimeInput({ text: chatInput });
                   setChatMessages(prev => [...prev, { sender: 'user', text: chatInput, isFinished: true }]);
                   addLog(`[USER] ${chatInput}`);
                   setChatInput('');

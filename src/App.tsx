@@ -183,7 +183,11 @@ export default function App() {
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const isCameraOpenRef = useRef(false);
   const [isChatOpen, setIsChatOpen] = useState(false);
-  const [browserUrl, setBrowserUrl] = useState<string | null>(null);
+  const [isScreenSharing, setIsScreenSharing] = useState(false);
+  const [isRecording, setIsRecording] = useState(false);
+  const [pendingScreenRequest, setPendingScreenRequest] = useState<{id: string, type: 'share' | 'record'} | null>(null);
+  const [showResetPassword, setShowResetPassword] = useState(false);
+  const [resetPasswordInput, setResetPasswordInput] = useState('');
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<{sender: 'user'|'aifa', text: string, isFinished?: boolean}[]>(() => {
     const saved = localStorage.getItem('aifa_chat_history');
@@ -197,7 +201,12 @@ export default function App() {
   const logsEndRef = useRef<HTMLDivElement>(null);
   const hudVideoRef = useRef<HTMLVideoElement>(null);
   const hudCanvasRef = useRef<HTMLCanvasElement>(null);
+  const screenVideoRef = useRef<HTMLVideoElement>(null);
   const videoStreamRef = useRef<MediaStream | null>(null);
+  const screenStreamRef = useRef<MediaStream | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
+  const isScreenSharingRef = useRef(false);
 
   useEffect(() => {
     if (chatEndRef.current) {
@@ -700,22 +709,47 @@ export default function App() {
               }
             },
             {
-              name: 'openBrowser',
-              description: 'Open a built-in browser to a specific URL. Use this to show websites, maps, or search results.',
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  url: { type: Type.STRING, description: 'The URL to open, e.g., https://www.google.com' }
-                },
-                required: ['url']
-              }
-            },
-            {
-              name: 'closeBrowser',
-              description: 'Close the built-in browser.',
+              name: 'startScreenShare',
+              description: 'Start capturing the user\'s screen so you can see what is on it.',
               parameters: {
                 type: Type.OBJECT,
                 properties: {}
+              }
+            },
+            {
+              name: 'stopScreenShare',
+              description: 'Stop capturing the user\'s screen.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {}
+              }
+            },
+            {
+              name: 'startScreenRecord',
+              description: 'Start recording the user\'s screen.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {}
+              }
+            },
+            {
+              name: 'stopScreenRecord',
+              description: 'Stop recording the user\'s screen and save the video file.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {}
+              }
+            },
+            {
+              name: 'createAndSaveTextFile',
+              description: 'Create a text file with the given content and save it to the user\'s device.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  filename: { type: Type.STRING, description: 'The name of the file to save, e.g., notes.txt' },
+                  content: { type: Type.STRING, description: 'The text content to save in the file' }
+                },
+                required: ['filename', 'content']
               }
             },
             {
@@ -728,6 +762,16 @@ export default function App() {
                   text: { type: Type.STRING, description: 'The message text to send' }
                 },
                 required: ['phone', 'text']
+              }
+            },
+            {
+              name: 'openGoogleMeet',
+              description: 'Open Google Meet to start or join a meeting.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  meetingCode: { type: Type.STRING, description: 'Optional meeting code or link to join. Leave empty to start a new meeting.' }
+                }
               }
             }
           ]
@@ -748,6 +792,9 @@ export default function App() {
         });
       }
 
+      const recentHistory = chatMessages.slice(-10).map(m => `${m.sender === 'user' ? 'User' : 'Aifa'}: ${m.text}`).join('\n');
+      const historyContext = recentHistory ? `\n\nHere is the recent conversation history for context:\n${recentHistory}` : '';
+
       const config: any = {
         responseModalities: [Modality.AUDIO],
         speechConfig: {
@@ -756,8 +803,8 @@ export default function App() {
         outputAudioTranscription: {},
         inputAudioTranscription: {},
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can open a built-in browser via 'openBrowser' to show websites or maps. You can close the browser via 'closeBrowser'. You can send WhatsApp messages via 'sendWhatsApp'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can open a built-in browser via 'openBrowser' to show websites or maps. You can close the browser via 'closeBrowser'. You can send WhatsApp messages via 'sendWhatsApp'. When the camera is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`,
         tools: tools,
       };
 
@@ -808,15 +855,23 @@ export default function App() {
 
             // Start video frame capture
             const videoInterval = setInterval(() => {
-              if (!isConnectedRef.current || !isCameraOpenRef.current || !hudVideoRef.current || !hudCanvasRef.current) return;
-              const video = hudVideoRef.current;
-              const canvas = hudCanvasRef.current;
-              if (video.readyState >= 2) {
-                canvas.width = video.videoWidth;
-                canvas.height = video.videoHeight;
+              if (!isConnectedRef.current || !hudCanvasRef.current) return;
+              
+              let videoToCapture: HTMLVideoElement | null = null;
+              
+              if (isScreenSharingRef.current && screenVideoRef.current && screenVideoRef.current.readyState >= 2) {
+                videoToCapture = screenVideoRef.current;
+              } else if (isCameraOpenRef.current && hudVideoRef.current && hudVideoRef.current.readyState >= 2) {
+                videoToCapture = hudVideoRef.current;
+              }
+
+              if (videoToCapture) {
+                const canvas = hudCanvasRef.current;
+                canvas.width = videoToCapture.videoWidth;
+                canvas.height = videoToCapture.videoHeight;
                 const ctx = canvas.getContext('2d');
                 if (ctx) {
-                  ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                  ctx.drawImage(videoToCapture, 0, 0, canvas.width, canvas.height);
                   const base64Data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
                   sessionPromise.then(session => {
                     if (isConnectedRef.current) {
@@ -1156,11 +1211,22 @@ export default function App() {
                     });
                   }
 
-                  if (call.name === 'openBrowser') {
-                    const { url } = call.args;
-                    addLog(`[BROWSER] Opening ${url}`);
-                    setBrowserUrl(url as string);
+                  if (call.name === 'startScreenShare') {
+                    addLog(`[SYS] Screen share requested`);
                     playSfx('task_action');
+                    setPendingScreenRequest({ id: call.id, type: 'share' });
+                  }
+
+                  if (call.name === 'stopScreenShare') {
+                    addLog(`[SYS] Stopping screen share`);
+                    playSfx('task_action');
+                    
+                    if (screenStreamRef.current) {
+                      screenStreamRef.current.getTracks().forEach(track => track.stop());
+                      screenStreamRef.current = null;
+                    }
+                    isScreenSharingRef.current = false;
+                    setIsScreenSharing(false);
                     
                     sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
@@ -1168,16 +1234,26 @@ export default function App() {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
-                          response: { success: true, message: `Browser opened to ${url}.` }
+                          response: { success: true, message: `Screen sharing stopped.` }
                         }]
                       });
                     });
                   }
 
-                  if (call.name === 'closeBrowser') {
-                    addLog(`[BROWSER] Closing browser`);
-                    setBrowserUrl(null);
+                  if (call.name === 'startScreenRecord') {
+                    addLog(`[SYS] Screen record requested`);
                     playSfx('task_action');
+                    setPendingScreenRequest({ id: call.id, type: 'record' });
+                  }
+
+                  if (call.name === 'stopScreenRecord') {
+                    addLog(`[SYS] Stopping screen record`);
+                    playSfx('task_action');
+                    
+                    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== 'inactive') {
+                      mediaRecorderRef.current.stop();
+                    }
+                    setIsRecording(false);
                     
                     sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
@@ -1185,7 +1261,32 @@ export default function App() {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
-                          response: { success: true, message: `Browser closed.` }
+                          response: { success: true, message: `Screen recording stopped and file saved.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  if (call.name === 'createAndSaveTextFile') {
+                    const { filename, content } = call.args;
+                    addLog(`[FILE] Creating ${filename}`);
+                    playSfx('task_action');
+                    
+                    const blob = new Blob([content as string], { type: 'text/plain' });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement('a');
+                    a.href = url;
+                    a.download = filename as string;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `File ${filename} created and downloaded.` }
                         }]
                       });
                     });
@@ -1202,11 +1303,11 @@ export default function App() {
                       const cmd = isWin ? `start whatsapp://send?phone=${phone}&text=${encodeURIComponent(text as string)}` : `open "whatsapp://send?phone=${phone}&text=${encodeURIComponent(text as string)}"`;
                       (window as any).electronAPI?.runCommand(cmd).catch(() => {
                         // Fallback to browser
-                        setBrowserUrl(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`);
+                        window.open(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`, '_blank');
                       });
                     } else {
-                      // Open in built-in browser
-                      setBrowserUrl(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`);
+                      // Open in new tab
+                      window.open(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`, '_blank');
                     }
 
                     sessionPromise.then(session => {
@@ -1216,6 +1317,26 @@ export default function App() {
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `WhatsApp message initiated.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  if (call.name === 'openGoogleMeet') {
+                    const { meetingCode } = call.args;
+                    addLog(`[MEET] Opening Google Meet`);
+                    playSfx('task_action');
+                    
+                    const url = meetingCode ? `https://meet.google.com/${meetingCode}` : 'https://meet.google.com/new';
+                    window.open(url, '_blank');
+
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Google Meet opened in a new tab.` }
                         }]
                       });
                     });
@@ -1432,15 +1553,40 @@ export default function App() {
           <button onClick={() => { playSfx('auth_success'); setIsUnlocked(true); speakText(`Welcome back, Master.`); }} className="absolute bottom-10 text-[10px] text-cyan-900 hover:text-cyan-600 tracking-widest">
             [ MANUAL OVERRIDE ]
           </button>
-          <button onClick={() => { 
-            localStorage.clear(); 
-            if (userId) {
-              setDoc(doc(db, `users/${userId}/preferences/default`), { faceEnrolled: false }, { merge: true }).catch(console.error);
-            }
-            window.location.reload(); 
-          }} className="absolute bottom-4 text-[10px] text-red-900 hover:text-red-600 tracking-widest">
-            [ RESET BIOMETRICS ]
-          </button>
+          
+          {showResetPassword ? (
+            <div className="absolute bottom-4 flex flex-col items-center gap-2">
+              <input 
+                type="password" 
+                value={resetPasswordInput}
+                onChange={(e) => setResetPasswordInput(e.target.value)}
+                placeholder="ENTER PASSWORD"
+                className="bg-black/50 border border-red-900/50 rounded px-2 py-1 text-xs font-mono text-red-500 text-center focus:outline-none focus:border-red-500"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    if (resetPasswordInput === 'y1lovehurtz') {
+                      localStorage.removeItem('aifa_user_face_descriptor');
+                      localStorage.removeItem('aifa_user_face');
+                      if (userId) {
+                        setDoc(doc(db, `users/${userId}/preferences/default`), { faceEnrolled: false }, { merge: true }).catch(console.error);
+                      }
+                      window.location.reload();
+                    } else {
+                      playSfx('auth_fail');
+                      setResetPasswordInput('');
+                    }
+                  }
+                }}
+              />
+              <button onClick={() => { setShowResetPassword(false); setResetPasswordInput(''); }} className="text-[10px] text-cyan-900 hover:text-cyan-600 tracking-widest">
+                [ BACK ]
+              </button>
+            </div>
+          ) : (
+            <button onClick={() => setShowResetPassword(true)} className="absolute bottom-4 text-[10px] text-red-900 hover:text-red-600 tracking-widest">
+              [ RESET BIOMETRICS ]
+            </button>
+          )}
         </motion.div>
       </div>
     );
@@ -1472,6 +1618,155 @@ export default function App() {
               <div>
                 <h2 className="text-red-500 font-mono font-bold tracking-widest text-xl">ALARM TRIGGERED</h2>
                 <p className="text-red-200 font-mono">{activeAlarm}</p>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Screen Request Modal */}
+      <AnimatePresence>
+        {pendingScreenRequest && (
+          <motion.div 
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="absolute inset-0 z-[100] flex items-center justify-center bg-black/80 backdrop-blur-sm"
+          >
+            <div className={`bg-neutral-950 border ${borderColor} p-6 max-w-md w-full shadow-[0_0_50px_rgba(6,182,212,0.2)]`}>
+              <div className="flex items-center gap-3 mb-4">
+                <Monitor className={`w-6 h-6 ${textColor}`} />
+                <h2 className={`font-mono font-bold tracking-widest text-lg ${textColor}`}>SCREEN ACCESS REQUEST</h2>
+              </div>
+              <p className={`font-mono text-sm ${isAlert ? 'text-red-300' : 'text-cyan-300'} mb-6`}>
+                Aifa is requesting permission to {pendingScreenRequest.type === 'share' ? 'view' : 'record'} your screen.
+              </p>
+              <div className="flex justify-end gap-4">
+                <button 
+                  onClick={() => {
+                    const callId = pendingScreenRequest.id;
+                    const callName = pendingScreenRequest.type === 'share' ? 'startScreenShare' : 'startScreenRecord';
+                    setPendingScreenRequest(null);
+                    
+                    sessionRef.current?.sendToolResponse({
+                      functionResponses: [{
+                        id: callId,
+                        name: callName,
+                        response: { success: false, message: `User denied the screen request.` }
+                      }]
+                    });
+                  }}
+                  className={`px-4 py-2 border border-neutral-700 text-neutral-400 hover:bg-neutral-800 font-mono text-xs tracking-widest transition-colors`}
+                >
+                  DENY
+                </button>
+                <button 
+                  onClick={() => {
+                    const callId = pendingScreenRequest.id;
+                    const type = pendingScreenRequest.type;
+                    const callName = type === 'share' ? 'startScreenShare' : 'startScreenRecord';
+                    setPendingScreenRequest(null);
+                    
+                    if (type === 'share') {
+                      navigator.mediaDevices.getDisplayMedia({ 
+                        video: { 
+                          displaySurface: "monitor",
+                          width: { ideal: 1920 },
+                          height: { ideal: 1080 },
+                          frameRate: { ideal: 30 }
+                        } 
+                      })
+                        .then(stream => {
+                          screenStreamRef.current = stream;
+                          isScreenSharingRef.current = true;
+                          setIsScreenSharing(true);
+                          
+                          if (screenVideoRef.current) {
+                            screenVideoRef.current.srcObject = stream;
+                            screenVideoRef.current.play().catch(console.error);
+                          }
+                          
+                          stream.getVideoTracks()[0].onended = () => {
+                            isScreenSharingRef.current = false;
+                            setIsScreenSharing(false);
+                            screenStreamRef.current = null;
+                          };
+
+                          sessionRef.current?.sendToolResponse({
+                            functionResponses: [{
+                              id: callId,
+                              name: callName,
+                              response: { success: true, message: `Screen sharing started.` }
+                            }]
+                          });
+                        })
+                        .catch(err => {
+                          console.error("Screen share error", err);
+                          sessionRef.current?.sendToolResponse({
+                            functionResponses: [{
+                              id: callId,
+                              name: callName,
+                              response: { success: false, message: `Failed to start screen share: ${err.message}` }
+                            }]
+                          });
+                        });
+                    } else {
+                      navigator.mediaDevices.getDisplayMedia({ 
+                        video: { 
+                          displaySurface: "monitor",
+                          width: { ideal: 1920, max: 3840 },
+                          height: { ideal: 1080, max: 2160 },
+                          frameRate: { ideal: 60, max: 60 }
+                        }, 
+                        audio: true 
+                      })
+                        .then(stream => {
+                          const mediaRecorder = new MediaRecorder(stream);
+                          mediaRecorderRef.current = mediaRecorder;
+                          recordedChunksRef.current = [];
+                          
+                          mediaRecorder.ondataavailable = (e) => {
+                            if (e.data.size > 0) {
+                              recordedChunksRef.current.push(e.data);
+                            }
+                          };
+                          
+                          mediaRecorder.onstop = () => {
+                            const blob = new Blob(recordedChunksRef.current, { type: 'video/webm' });
+                            const url = URL.createObjectURL(blob);
+                            const a = document.createElement('a');
+                            a.href = url;
+                            a.download = `screen_record_${Date.now()}.webm`;
+                            a.click();
+                            URL.revokeObjectURL(url);
+                            stream.getTracks().forEach(track => track.stop());
+                          };
+                          
+                          mediaRecorder.start();
+                          setIsRecording(true);
+
+                          sessionRef.current?.sendToolResponse({
+                            functionResponses: [{
+                              id: callId,
+                              name: callName,
+                              response: { success: true, message: `Screen recording started.` }
+                            }]
+                          });
+                        })
+                        .catch(err => {
+                          console.error("Screen record error", err);
+                          sessionRef.current?.sendToolResponse({
+                            functionResponses: [{
+                              id: callId,
+                              name: callName,
+                              response: { success: false, message: `Failed to start screen record: ${err.message}` }
+                            }]
+                          });
+                        });
+                    }
+                  }}
+                  className={`px-4 py-2 border ${borderColor} ${textColor} hover:bg-cyan-900/30 font-mono text-xs tracking-widest transition-colors`}
+                >
+                  ALLOW
+                </button>
               </div>
             </div>
           </motion.div>
@@ -1909,32 +2204,8 @@ export default function App() {
           )}
         </AnimatePresence>
 
-        {/* Browser Panel */}
-        <AnimatePresence>
-          {browserUrl && (
-            <motion.aside
-              drag
-              dragMomentum={false}
-              initial={{ opacity: 0, scale: 0.8, x: 50, y: 50 }}
-              animate={{ opacity: 1, scale: 1 }}
-              exit={{ opacity: 0, scale: 0.8 }}
-              className={`absolute left-10 top-20 w-[800px] h-[600px] z-50 bg-black/80 backdrop-blur-md border ${borderColor} rounded-lg shadow-[0_0_30px_rgba(6,182,212,0.2)] overflow-hidden flex flex-col`}
-            >
-              <div className={`p-2 border-b ${borderColor} bg-black/50 flex justify-between items-center cursor-move`}>
-                <div className="flex items-center gap-2">
-                  <Globe className={`w-4 h-4 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
-                  <h2 className={`font-mono font-bold tracking-widest text-xs ${isAlert ? 'text-red-400' : 'text-cyan-400'} truncate max-w-[600px]`}>{browserUrl}</h2>
-                </div>
-                <button onClick={() => setBrowserUrl(null)} className={`text-xs ${isAlert ? 'text-red-600 hover:text-red-400' : 'text-cyan-600 hover:text-cyan-400'}`}>
-                  [X]
-                </button>
-              </div>
-              <div className="flex-1 bg-white">
-                <iframe src={browserUrl} className="w-full h-full border-none" title="Browser" sandbox="allow-same-origin allow-scripts allow-popups allow-forms" />
-              </div>
-            </motion.aside>
-          )}
-        </AnimatePresence>
+        {/* Hidden Screen Video for Capture */}
+        <video ref={screenVideoRef} className="hidden" autoPlay muted playsInline />
 
         {/* Text Chat Panel */}
         <AnimatePresence>

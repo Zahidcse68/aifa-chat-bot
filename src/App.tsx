@@ -7,6 +7,15 @@ import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from 'firebas
 import { doc, setDoc, onSnapshot, collection, deleteDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 
+// --- Prevent WebSocket CLOSING/CLOSED native browser errors ---
+const originalWsSend = WebSocket.prototype.send;
+WebSocket.prototype.send = function(data) {
+  if (this.readyState === WebSocket.CLOSING || this.readyState === WebSocket.CLOSED) {
+    return; // Silently drop the message to prevent the native console error
+  }
+  return originalWsSend.call(this, data);
+};
+
 // Initialize Gemini API safely
 const apiKey = process.env.GEMINI_API_KEY;
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;

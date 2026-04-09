@@ -366,9 +366,13 @@ export default function App() {
               
               // Notify Aifa about the alarm if connected
               if (isConnectedRef.current && sessionRef.current) {
-                sessionRef.current.sendRealtimeInput({
-                  text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}".`
-                });
+                try {
+                  sessionRef.current.sendRealtimeInput({
+                    text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}".`
+                  });
+                } catch (e: any) {
+                  console.warn("Could not send alarm alert:", e.message);
+                }
               }
 
               return { ...t, alarmTriggered: true };
@@ -867,9 +871,14 @@ export default function App() {
               
               sessionPromise.then(session => {
                 if (!isConnectedRef.current) return;
-                session.sendRealtimeInput({
-                  audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-                });
+                try {
+                  session.sendRealtimeInput({
+                    audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+                  });
+                } catch (e: any) {
+                  console.warn("Could not send audio chunk, connection might be closed:", e.message);
+                  disconnect();
+                }
               }).catch(err => {
                 console.error("Error sending audio chunk:", err);
               });
@@ -897,9 +906,14 @@ export default function App() {
                   const base64Data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
                   sessionPromise.then(session => {
                     if (isConnectedRef.current) {
-                      session.sendRealtimeInput({
-                        video: { data: base64Data, mimeType: 'image/jpeg' }
-                      });
+                      try {
+                        session.sendRealtimeInput({
+                          video: { data: base64Data, mimeType: 'image/jpeg' }
+                        });
+                      } catch (e: any) {
+                        console.warn("Could not send video frame, connection might be closed:", e.message);
+                        disconnect();
+                      }
                     }
                   }).catch(err => {
                     console.error("Error sending video frame:", err);
@@ -2343,7 +2357,11 @@ export default function App() {
                 <form onSubmit={(e) => {
                   e.preventDefault();
                   if (!chatInput.trim() || !sessionRef.current) return;
-                  sessionRef.current.sendRealtimeInput({ text: chatInput });
+                  try {
+                    sessionRef.current.sendRealtimeInput({ text: chatInput });
+                  } catch (e: any) {
+                    console.warn("Could not send chat message:", e.message);
+                  }
                   setChatMessages(prev => [...prev, { sender: 'user', text: chatInput, isFinished: true }]);
                   addLog(`[USER] ${chatInput}`);
                   setChatInput('');

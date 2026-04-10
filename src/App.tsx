@@ -814,17 +814,20 @@ export default function App() {
       ];
 
       if (isDesktop) {
-        tools[0].functionDeclarations.push({
-          name: 'executeSystemCommand',
-          description: 'Executes a shell/terminal command on the users laptop. Use this to control system settings, open apps, send messages, or switch tabs.',
-          parameters: {
-            type: Type.OBJECT,
-            properties: {
-              command: { type: Type.STRING, description: 'The terminal command to execute' }
-            },
-            required: ['command']
-          }
-        });
+        const funcTool = tools.find(t => t.functionDeclarations);
+        if (funcTool) {
+          funcTool.functionDeclarations.push({
+            name: 'executeSystemCommand',
+            description: 'Executes a shell/terminal command on the users laptop. Use this to control system settings, open apps, send messages, or switch tabs.',
+            parameters: {
+              type: Type.OBJECT,
+              properties: {
+                command: { type: Type.STRING, description: 'The terminal command to execute' }
+              },
+              required: ['command']
+            }
+          });
+        }
       }
 
       const recentHistory = chatMessages.slice(-10).map(m => `${m.sender === 'user' ? 'User' : 'Aifa'}: ${m.text}`).join('\n');

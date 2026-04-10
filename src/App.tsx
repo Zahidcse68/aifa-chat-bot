@@ -194,6 +194,13 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+  const [isMobileScreen, setIsMobileScreen] = useState(typeof window !== 'undefined' ? window.innerWidth < 768 : false);
+
+  useEffect(() => {
+    const handleResize = () => setIsMobileScreen(window.innerWidth < 768);
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
   const [pendingScreenRequest, setPendingScreenRequest] = useState<{id: string, type: 'share' | 'record'} | null>(null);
   const [showResetPassword, setShowResetPassword] = useState(false);
   const [resetPasswordInput, setResetPasswordInput] = useState('');
@@ -278,7 +285,7 @@ export default function App() {
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<ScriptProcessorNode | null>(null);
+  const processorRef = useRef<any>(null);
   const nextPlayTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<{source: AudioBufferSourceNode, gainNode: GainNode}[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -624,7 +631,25 @@ export default function App() {
 
       const captureCtx = new AudioContextClass({ sampleRate: 16000 });
       const source = captureCtx.createMediaStreamSource(streamRef.current);
-      const processor = captureCtx.createScriptProcessor(4096, 1, 1);
+      
+      const workletCode = `
+      class PCMProcessor extends AudioWorkletProcessor {
+        process(inputs, outputs, parameters) {
+          const input = inputs[0];
+          if (input && input.length > 0) {
+            const channelData = input[0];
+            this.port.postMessage(channelData);
+          }
+          return true;
+        }
+      }
+      registerProcessor('pcm-processor', PCMProcessor);
+      `;
+      const blob = new Blob([workletCode], { type: 'application/javascript' });
+      const workletUrl = URL.createObjectURL(blob);
+      
+      await captureCtx.audioWorklet.addModule(workletUrl);
+      const processor = new AudioWorkletNode(captureCtx, 'pcm-processor');
       processorRef.current = processor;
 
       source.connect(processor);
@@ -856,10 +881,10 @@ export default function App() {
             setStatusText('LISTENING...');
             addLog(`[SYS] Neural link established. Welcome ${userName}.`);
             
-            processor.onaudioprocess = (e) => {
+            processor.port.onmessage = (e) => {
               if (!isConnectedRef.current) return;
 
-              const inputData = e.inputBuffer.getChannelData(0);
+              const inputData = e.data;
               const pcm16 = new Int16Array(inputData.length);
               let sum = 0;
               for (let i = 0; i < inputData.length; i++) {
@@ -1541,7 +1566,11 @@ export default function App() {
     }
     if (processorRef.current) {
       try { processorRef.current.disconnect(); } catch (e) {}
-      processorRef.current.onaudioprocess = null;
+      if (processorRef.current.port) {
+        processorRef.current.port.onmessage = null;
+      } else {
+        processorRef.current.onaudioprocess = null;
+      }
       processorRef.current = null;
     }
     if (streamRef.current) {
@@ -1904,7 +1933,7 @@ export default function App() {
 
       {/* HUD Container (Animated for Zoom/Pan) */}
       <motion.div 
-        className="flex flex-1 w-full relative z-10"
+        className="flex flex-col md:flex-row flex-1 w-full relative z-10 overflow-y-auto overflow-x-hidden md:overflow-hidden custom-scrollbar"
         animate={{ 
           scale: hudTransform.scale, 
           x: hudTransform.x, 
@@ -1914,14 +1943,14 @@ export default function App() {
       >
         {/* Left Panel: System Monitor */}
         <motion.aside 
-          drag
+          drag={!isMobileScreen}
           dragMomentum={false}
           animate={{ 
-            scale: focusedElement === 'monitor' ? 1.1 : 1,
+            scale: focusedElement === 'monitor' && !isMobileScreen ? 1.05 : 1,
             zIndex: focusedElement === 'monitor' ? 50 : 20,
             boxShadow: focusedElement === 'monitor' ? (isAlert ? '0 0 50px rgba(239,68,68,0.2)' : '0 0 50px rgba(6,182,212,0.2)') : 'none'
           }}
-          className={`w-80 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500 absolute left-0 top-0 bottom-0 cursor-move`}
+          className={`w-full md:w-80 min-h-[400px] md:min-h-0 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500 relative md:absolute md:left-0 md:top-0 md:bottom-0 cursor-move`}
         >
           <div className={`p-6 border-b ${borderColor}`}>
             <div className="flex items-center gap-3 mb-4">
@@ -1977,24 +2006,25 @@ export default function App() {
         </motion.aside>
 
         {/* Center Panel: Orb & Controls */}
-        <main className="flex-1 flex flex-col relative overflow-hidden pointer-events-none">
+        <main className="flex-1 min-h-[500px] md:min-h-0 flex flex-col relative overflow-hidden pointer-events-none">
           {/* Header */}
-          <header className="absolute top-0 w-full p-6 flex justify-between items-center z-20 pointer-events-none">
-            <div className="flex items-center gap-3">
-              <div className={`p-2 ${isAlert ? 'bg-red-500/10 border-red-500/20' : 'bg-cyan-500/10 border-cyan-500/20'} rounded-xl border`}>
-                <Crosshair className={`w-5 h-5 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+          <header className="absolute top-0 w-full p-4 md:p-6 md:px-[340px] flex justify-between items-center z-20 pointer-events-none">
+            <div className="flex items-center gap-2 md:gap-3">
+              <div className={`p-1.5 md:p-2 ${isAlert ? 'bg-red-500/10 border-red-500/20' : 'bg-cyan-500/10 border-cyan-500/20'} rounded-xl border`}>
+                <Crosshair className={`w-4 h-4 md:w-5 md:h-5 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
               </div>
               <div>
-                <h1 className={`font-semibold text-xl tracking-widest ${isAlert ? 'text-red-100' : 'text-cyan-100'} uppercase`}>Aifa - My Personal Assistant</h1>
-                <p className={`text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} font-mono tracking-widest`}>
+                <h1 className={`font-semibold text-sm md:text-xl tracking-widest ${isAlert ? 'text-red-100' : 'text-cyan-100'} uppercase`}>Aifa - My Personal Assistant</h1>
+                <p className={`text-[10px] md:text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} font-mono tracking-widest`}>
                   MK-V // {isDesktop ? 'LOCAL HOST' : 'SANDBOX'}
                 </p>
               </div>
             </div>
             {!isDesktop && (
-              <div className={`pointer-events-auto flex items-center gap-2 ${isAlert ? 'text-red-400 bg-red-500/10 border-red-500/20' : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'} font-mono text-xs px-3 py-1.5 rounded-full border`}>
+              <div className={`pointer-events-auto flex items-center gap-1 md:gap-2 ${isAlert ? 'text-red-400 bg-red-500/10 border-red-500/20' : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'} font-mono text-[10px] md:text-xs px-2 py-1 md:px-3 md:py-1.5 rounded-full border`}>
                 <Download className="w-3 h-3" />
-                <span>npm run dev:desktop</span>
+                <span className="hidden sm:inline">npm run dev:desktop</span>
+                <span className="sm:hidden">desktop</span>
               </div>
             )}
           </header>
@@ -2002,10 +2032,10 @@ export default function App() {
           {/* Orb Area (Iron Man Style HUD) */}
           <motion.div 
             animate={{ 
-              scale: focusedElement === 'orb' ? 1.2 : 1,
+              scale: focusedElement === 'orb' && !isMobileScreen ? 1.1 : 1,
               zIndex: focusedElement === 'orb' ? 50 : 10
             }}
-            className="flex-1 flex flex-col items-center justify-center relative transition-all duration-500"
+            className="flex-1 flex flex-col items-center justify-center relative transition-all duration-500 mt-16 md:mt-0"
           >
             
             {/* Rotating HUD Rings */}
@@ -2013,17 +2043,17 @@ export default function App() {
               <motion.div 
                 animate={{ rotate: 360 }} 
                 transition={{ duration: 40, repeat: Infinity, ease: "linear" }}
-                className={`absolute w-[700px] h-[700px] rounded-full border border-dashed ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'}`}
+                className={`absolute w-[300px] h-[300px] md:w-[700px] md:h-[700px] rounded-full border border-dashed ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'}`}
               />
               <motion.div 
                 animate={{ rotate: -360 }} 
                 transition={{ duration: 30, repeat: Infinity, ease: "linear" }}
-                className={`absolute w-[550px] h-[550px] rounded-full border-2 border-dotted ${isAlert ? 'border-red-400/20' : 'border-cyan-400/20'}`}
+                className={`absolute w-[240px] h-[240px] md:w-[550px] md:h-[550px] rounded-full border-2 border-dotted ${isAlert ? 'border-red-400/20' : 'border-cyan-400/20'}`}
               />
               <motion.div 
                 animate={{ rotate: 360 }} 
                 transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-                className={`absolute w-[400px] h-[400px] rounded-full border ${isAlert ? 'border-red-300/10' : 'border-cyan-300/10'}`}
+                className={`absolute w-[180px] h-[180px] md:w-[400px] md:h-[400px] rounded-full border ${isAlert ? 'border-red-300/10' : 'border-cyan-300/10'}`}
               />
             </div>
 
@@ -2033,7 +2063,7 @@ export default function App() {
                 scale: isSpeaking ? 1.2 : 1
               }}
               transition={{ duration: 2, repeat: Infinity, repeatType: "reverse" }}
-              className={`absolute w-[600px] h-[600px] ${isAlert ? 'bg-red-600' : 'bg-cyan-600'} rounded-full blur-[150px] pointer-events-none`}
+              className={`absolute w-[250px] h-[250px] md:w-[600px] md:h-[600px] ${isAlert ? 'bg-red-600' : 'bg-cyan-600'} rounded-full blur-[100px] md:blur-[150px] pointer-events-none`}
             />
 
             <div className="relative z-10 flex flex-col items-center pointer-events-auto">
@@ -2053,51 +2083,51 @@ export default function App() {
                   repeat: Infinity,
                   ease: "easeInOut"
                 }}
-                className={`w-56 h-56 rounded-full flex items-center justify-center transition-all duration-500 ${
+                className={`w-32 h-32 md:w-56 md:h-56 rounded-full flex items-center justify-center transition-all duration-500 ${
                   connectionState === 'connected' 
                     ? `bg-neutral-950 border-2 ${isAlert ? 'border-red-400/50' : 'border-cyan-400/50'}` 
                     : `bg-neutral-950 border-2 border-neutral-800 hover:${isAlert ? 'border-red-500/50' : 'border-cyan-500/50'} hover:bg-neutral-900 disabled:opacity-50 disabled:cursor-not-allowed`
                 }`}
               >
                 {connectionState === 'connected' ? (
-                  <div className={`absolute inset-4 rounded-full border ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'} flex items-center justify-center overflow-hidden`}>
+                  <div className={`absolute inset-2 md:inset-4 rounded-full border ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'} flex items-center justify-center overflow-hidden`}>
                     <motion.div 
                       animate={{ rotate: 360 }}
                       transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
                       className={`absolute inset-0 ${isAlert ? 'bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(239,68,68,0.6)_360deg)]' : 'bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(6,182,212,0.6)_360deg)]'}`}
                     />
                     <div className="absolute inset-1 bg-neutral-950 rounded-full flex items-center justify-center">
-                      <div className={`w-32 h-32 rounded-full blur-2xl ${isSpeaking ? (isAlert ? 'bg-red-300/60' : 'bg-cyan-300/60') : (isAlert ? 'bg-red-600/30' : 'bg-cyan-600/30')}`} />
+                      <div className={`w-16 h-16 md:w-32 md:h-32 rounded-full blur-xl md:blur-2xl ${isSpeaking ? (isAlert ? 'bg-red-300/60' : 'bg-cyan-300/60') : (isAlert ? 'bg-red-600/30' : 'bg-cyan-600/30')}`} />
                       <div className="relative flex items-center justify-center">
-                        <Hexagon className={`absolute w-16 h-16 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_10s_linear_infinite]`} />
-                        <Aperture className={`absolute w-8 h-8 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_4s_linear_infinite_reverse]`} />
+                        <Hexagon className={`absolute w-8 h-8 md:w-16 md:h-16 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_10s_linear_infinite]`} />
+                        <Aperture className={`absolute w-4 h-4 md:w-8 md:h-8 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_4s_linear_infinite_reverse]`} />
                       </div>
                     </div>
                   </div>
                 ) : connectionState === 'connecting' ? (
-                  <div className="flex flex-col items-center gap-4">
-                    <Loader2 className={`w-10 h-10 ${isAlert ? 'text-red-500' : 'text-cyan-500'} animate-spin`} />
-                    <span className={`font-mono text-xs ${isAlert ? 'text-red-500' : 'text-cyan-500'} tracking-widest`}>INITIALIZING</span>
+                  <div className="flex flex-col items-center gap-2 md:gap-4">
+                    <Loader2 className={`w-6 h-6 md:w-10 md:h-10 ${isAlert ? 'text-red-500' : 'text-cyan-500'} animate-spin`} />
+                    <span className={`font-mono text-[10px] md:text-xs ${isAlert ? 'text-red-500' : 'text-cyan-500'} tracking-widest`}>INITIALIZING</span>
                   </div>
                 ) : (
                   <div className="relative flex items-center justify-center">
-                    <Hexagon className="absolute w-16 h-16 text-neutral-700" />
-                    <Aperture className="absolute w-8 h-8 text-neutral-700" />
+                    <Hexagon className="absolute w-8 h-8 md:w-16 md:h-16 text-neutral-700" />
+                    <Aperture className="absolute w-4 h-4 md:w-8 md:h-8 text-neutral-700" />
                   </div>
                 )}
               </motion.button>
 
-              <div className="mt-16 text-center h-16">
+              <div className="mt-8 md:mt-16 text-center h-16">
                 <motion.p 
                   key={statusText}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`text-2xl font-light tracking-[0.3em] ${connectionState === 'connected' ? (isAlert ? 'text-red-100' : 'text-cyan-100') : 'text-neutral-600'}`}
+                  className={`text-lg md:text-2xl font-light tracking-[0.2em] md:tracking-[0.3em] ${connectionState === 'connected' ? (isAlert ? 'text-red-100' : 'text-cyan-100') : 'text-neutral-600'}`}
                 >
                   {statusText}
                 </motion.p>
                 {connectionState === 'connected' && !isSpeaking && (
-                  <p className={`text-xs font-mono ${isAlert ? 'text-red-500/60' : 'text-cyan-500/60'} mt-3 animate-pulse tracking-widest`}>
+                  <p className={`text-[10px] md:text-xs font-mono ${isAlert ? 'text-red-500/60' : 'text-cyan-500/60'} mt-2 md:mt-3 animate-pulse tracking-widest`}>
                     AWAITING VOICE INPUT...
                   </p>
                 )}
@@ -2106,11 +2136,11 @@ export default function App() {
           </motion.div>
 
           {/* Footer */}
-          <footer className="p-8 flex justify-center z-20 pointer-events-auto">
+          <footer className="p-4 md:p-8 flex justify-center z-20 pointer-events-auto">
             <button
               onClick={connectionState === 'connected' ? disconnect : connect}
               disabled={connectionState === 'connecting'}
-              className={`flex items-center gap-3 px-10 py-4 rounded-none border font-mono text-sm tracking-widest transition-all ${
+              className={`flex items-center gap-2 md:gap-3 px-6 py-3 md:px-10 md:py-4 rounded-none border font-mono text-xs md:text-sm tracking-widest transition-all ${
                 connectionState === 'connected' 
                   ? 'bg-red-950/30 text-red-400 hover:bg-red-900/40 border-red-500/30' 
                   : `${isAlert ? 'bg-red-950/30 text-red-400 hover:bg-red-900/40 border-red-500/30 hover:shadow-[0_0_20px_rgba(239,68,68,0.2)]' : 'bg-cyan-950/30 text-cyan-400 hover:bg-cyan-900/40 border-cyan-500/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]'} disabled:opacity-50 disabled:cursor-not-allowed`
@@ -2138,14 +2168,14 @@ export default function App() {
 
         {/* Right Panel: Tasks & Schedule */}
         <motion.aside 
-          drag
+          drag={!isMobileScreen}
           dragMomentum={false}
           animate={{ 
-            scale: focusedElement === 'tasks' ? 1.1 : 1,
+            scale: focusedElement === 'tasks' && !isMobileScreen ? 1.05 : 1,
             zIndex: focusedElement === 'tasks' ? 50 : 20,
             boxShadow: focusedElement === 'tasks' ? (isAlert ? '0 0 50px rgba(239,68,68,0.2)' : '0 0 50px rgba(6,182,212,0.2)') : 'none'
           }}
-          className={`w-80 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500 absolute right-0 top-0 bottom-0 cursor-move`}
+          className={`w-full md:w-80 min-h-[400px] md:min-h-0 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500 relative md:absolute md:right-0 md:top-0 md:bottom-0 cursor-move`}
         >
           
           {/* Next Execution Widget */}
@@ -2221,10 +2251,9 @@ export default function App() {
         </motion.aside>
         {/* Weather Panel */}
         <motion.aside
-          drag
+          drag={!isMobileScreen}
           dragMomentum={false}
-          initial={{ x: 350, y: 100 }}
-          className={`w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30`}
+          className={`w-full md:w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col relative md:absolute md:left-[350px] md:top-[100px] cursor-move z-30 my-4 md:my-0`}
         >
           <div className={`p-4 border-b ${borderColor}`}>
             <div className="flex items-center gap-2 mb-2">
@@ -2257,10 +2286,9 @@ export default function App() {
 
         {/* Room Conditions Panel */}
         <motion.aside
-          drag
+          drag={!isMobileScreen}
           dragMomentum={false}
-          initial={{ x: 350, y: 450 }}
-          className={`w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30`}
+          className={`w-full md:w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col relative md:absolute md:left-[350px] md:top-[450px] cursor-move z-30 mb-4 md:mb-0`}
         >
           <div className={`p-4 border-b ${borderColor}`}>
             <div className="flex items-center gap-2 mb-2">
@@ -2304,12 +2332,12 @@ export default function App() {
         <AnimatePresence>
           {isCameraOpen && (
             <motion.aside
-              drag
+              drag={!isMobileScreen}
               dragMomentum={false}
-              initial={{ opacity: 0, scale: 0.8, x: 50, y: 50 }}
+              initial={{ opacity: 0, scale: 0.8 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.8 }}
-              className={`w-64 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-40`}
+              className={`w-full md:w-64 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col relative md:absolute md:left-[50px] md:top-[50px] cursor-move z-40 mb-4 md:mb-0`}
             >
               <div className={`p-2 border-b ${borderColor} flex justify-between items-center`}>
                 <div className="flex items-center gap-2">
@@ -2337,12 +2365,12 @@ export default function App() {
         <AnimatePresence>
           {isChatOpen && (
             <motion.aside
-              drag
+              drag={!isMobileScreen}
               dragMomentum={false}
-              initial={{ opacity: 0, scale: 0.8, x: 50, y: 300 }}
+              initial={{ opacity: 0, scale: 0.8 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.8 }}
-              className={`w-80 border ${borderColor} bg-neutral-950/90 backdrop-blur-md flex flex-col absolute cursor-move z-40`}
+              className={`w-full md:w-80 border ${borderColor} bg-neutral-950/90 backdrop-blur-md flex flex-col relative md:absolute md:left-[50px] md:top-[300px] cursor-move z-40 mb-4 md:mb-0`}
             >
               <div className={`p-2 border-b ${borderColor} flex justify-between items-center`}>
                 <div className="flex items-center gap-2">

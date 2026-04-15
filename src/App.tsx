@@ -7,6 +7,20 @@ import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from 'firebas
 import { doc, setDoc, onSnapshot, collection, deleteDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 
+
+function safeSendToolResponse(session: any, response: any) {
+  try {
+    if (session) {
+      if (session.conn && (session.conn.readyState === WebSocket.CLOSING || session.conn.readyState === WebSocket.CLOSED)) {
+        return;
+      }
+      session.sendToolResponse(response);
+    }
+  } catch (e: any) {
+    console.warn('Could not send tool response:', e.message);
+  }
+}
+
 // --- Prevent WebSocket CLOSING/CLOSED native browser errors ---
 const originalWsSend = WebSocket.prototype.send;
 WebSocket.prototype.send = function(data) {
@@ -284,6 +298,7 @@ export default function App() {
   const isConnectedRef = useRef(false);
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const captureCtxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const processorRef = useRef<any>(null);
   const nextPlayTimeRef = useRef<number>(0);
@@ -383,7 +398,11 @@ export default function App() {
               // Notify Aifa about the alarm if connected
               if (isConnectedRef.current && sessionRef.current) {
                 try {
-                  sessionRef.current.sendRealtimeInput({
+                  const session = sessionRef.current;
+                  if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
+                    return;
+                  }
+                  session.sendRealtimeInput({
                     text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}".`
                   });
                 } catch (e: any) {
@@ -630,15 +649,31 @@ export default function App() {
       });
 
       const captureCtx = new AudioContextClass({ sampleRate: 16000 });
+      captureCtxRef.current = captureCtx;
+      if (captureCtx.state === 'suspended') {
+        await captureCtx.resume();
+      }
       const source = captureCtx.createMediaStreamSource(streamRef.current);
       
       const workletCode = `
       class PCMProcessor extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.buffer = new Float32Array(4096);
+          this.offset = 0;
+        }
         process(inputs, outputs, parameters) {
           const input = inputs[0];
           if (input && input.length > 0) {
             const channelData = input[0];
-            this.port.postMessage(channelData);
+            for (let i = 0; i < channelData.length; i++) {
+              this.buffer[this.offset++] = channelData[i];
+              if (this.offset >= 4096) {
+                this.port.postMessage(this.buffer);
+                this.buffer = new Float32Array(4096);
+                this.offset = 0;
+              }
+            }
           }
           return true;
         }
@@ -906,19 +941,19 @@ export default function App() {
               }
               const base64Data = btoa(binary);
               
-              sessionPromise.then(session => {
+              if (sessionRef.current) { const session = sessionRef.current;
                 if (!isConnectedRef.current) return;
                 try {
-                  session.sendRealtimeInput({
-                    audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
-                  });
+                  // Check if the underlying connection is still open before sending
+                  if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
+                    return;
+                  }
+                  session.sendRealtimeInput({ audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' } });
                 } catch (e: any) {
                   console.warn("Could not send audio chunk, connection might be closed:", e.message);
                   disconnect();
                 }
-              }).catch(err => {
-                console.error("Error sending audio chunk:", err);
-              });
+              }
             };
 
             // Start video frame capture
@@ -941,9 +976,13 @@ export default function App() {
                 if (ctx) {
                   ctx.drawImage(videoToCapture, 0, 0, canvas.width, canvas.height);
                   const base64Data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
-                  sessionPromise.then(session => {
+                  if (sessionRef.current) { const session = sessionRef.current;
                     if (isConnectedRef.current) {
                       try {
+                        // Check if the underlying connection is still open before sending
+                        if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
+                          return;
+                        }
                         session.sendRealtimeInput({
                           video: { data: base64Data, mimeType: 'image/jpeg' }
                         });
@@ -952,9 +991,7 @@ export default function App() {
                         disconnect();
                       }
                     }
-                  }).catch(err => {
-                    console.error("Error sending video frame:", err);
-                  });
+                  }
                 }
               }
             }, 3000);
@@ -1020,7 +1057,15 @@ export default function App() {
             }
 
             // Handle Audio Playback
-            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
+            let base64Audio = null;
+            if (message.serverContent?.modelTurn?.parts) {
+              for (const part of message.serverContent.modelTurn.parts) {
+                if (part.inlineData?.data) {
+                  base64Audio = part.inlineData.data;
+                  break;
+                }
+              }
+            }
             if (base64Audio && audioContextRef.current) {
               setIsSpeaking(true);
               setStatusText('PROCESSING...');
@@ -1112,16 +1157,16 @@ export default function App() {
                       responseMsg = `Current tasks: ${JSON.stringify(tasksRef.current)}`;
                     }
 
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: responseMsg }
                         }]
                       });
-                    });
+                    }
                   }
 
                   // HUD CONTROL
@@ -1151,16 +1196,16 @@ export default function App() {
                       });
                     }
 
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `HUD ${action} applied.` }
                         }]
                       });
-                    });
+                    }
                   }
                   
                   // LOGOUT SYSTEM
@@ -1171,16 +1216,16 @@ export default function App() {
                     setIsUnlocked(false);
                     setAuthStatus('locked');
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Logged out successfully.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   // LOCK SYSTEM
@@ -1195,16 +1240,16 @@ export default function App() {
                       (window as any).electronAPI.executeCommand('rundll32.exe user32.dll,LockWorkStation || pmset displaysleepnow');
                     }
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `System locked successfully.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   // UPDATE SOURCE CODE
@@ -1224,40 +1269,40 @@ export default function App() {
                         
                       (window as any).electronAPI.executeCommand(command)
                         .then(() => {
-                          sessionPromise.then(session => {
+                          if (sessionRef.current) { const session = sessionRef.current;
                             if (!isConnectedRef.current) return;
-                            session.sendToolResponse({
+                            safeSendToolResponse(session, {
                               functionResponses: [{
                                 id: call.id,
                                 name: call.name,
                                 response: { success: true, message: `Source code updated successfully. The dev server will restart automatically.` }
                               }]
                             });
-                          });
+                          }
                         })
                         .catch((err: any) => {
-                          sessionPromise.then(session => {
+                          if (sessionRef.current) { const session = sessionRef.current;
                             if (!isConnectedRef.current) return;
-                            session.sendToolResponse({
+                            safeSendToolResponse(session, {
                               functionResponses: [{
                                 id: call.id,
                                 name: call.name,
                                 response: { success: false, message: `Failed to update source code: ${err}` }
                               }]
                             });
-                          });
+                          }
                         });
                     } else {
-                      sessionPromise.then(session => {
+                      if (sessionRef.current) { const session = sessionRef.current;
                         if (!isConnectedRef.current) return;
-                        session.sendToolResponse({
+                        safeSendToolResponse(session, {
                           functionResponses: [{
                             id: call.id,
                             name: call.name,
                             response: { success: false, message: `Cannot update source code in web sandbox. Must be running locally.` }
                           }]
                         });
-                      });
+                      }
                     }
                   }
 
@@ -1268,16 +1313,16 @@ export default function App() {
                     setSystemStatus(status as any);
                     if (status === 'Alert') playSfx('auth_fail');
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `System status set to ${status}.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   // TOGGLE CAMERA
@@ -1288,16 +1333,16 @@ export default function App() {
                     addLog(`[SYS] Camera ${isOpen ? 'opened' : 'closed'}`);
                     playSfx('task_action');
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Camera ${isOpen ? 'opened' : 'closed'}.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   // TOGGLE CHAT
@@ -1308,16 +1353,16 @@ export default function App() {
                     addLog(`[SYS] Chat ${isOpen ? 'opened' : 'closed'}`);
                     playSfx('task_action');
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Chat ${isOpen ? 'opened' : 'closed'}.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   // CONNECT TO IP
@@ -1327,16 +1372,16 @@ export default function App() {
                     addLog(`[SYS] Connected to IP: ${ip}`);
                     playSfx('task_action');
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Connected to IP: ${ip}.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   // SEND IP COMMAND
@@ -1350,16 +1395,16 @@ export default function App() {
                       addLog(`[IP CMD] Response received: OK`);
                     }, 500);
 
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Command ${command} sent successfully.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   if (call.name === 'startScreenShare') {
@@ -1379,16 +1424,16 @@ export default function App() {
                     isScreenSharingRef.current = false;
                     setIsScreenSharing(false);
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Screen sharing stopped.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   if (call.name === 'startScreenRecord') {
@@ -1406,16 +1451,16 @@ export default function App() {
                     }
                     setIsRecording(false);
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Screen recording stopped and file saved.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   if (call.name === 'createAndSaveTextFile') {
@@ -1431,16 +1476,16 @@ export default function App() {
                     a.click();
                     URL.revokeObjectURL(url);
                     
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `File ${filename} created and downloaded.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   if (call.name === 'sendWhatsApp') {
@@ -1461,16 +1506,16 @@ export default function App() {
                       window.open(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`, '_blank');
                     }
 
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `WhatsApp message initiated.` }
                         }]
                       });
-                    });
+                    }
                   }
 
                   if (call.name === 'openGoogleMeet') {
@@ -1481,16 +1526,16 @@ export default function App() {
                     const url = meetingCode ? `https://meet.google.com/${meetingCode}` : 'https://meet.google.com/new';
                     window.open(url, '_blank');
 
-                    sessionPromise.then(session => {
+                    if (sessionRef.current) { const session = sessionRef.current;
                       if (!isConnectedRef.current) return;
-                      session.sendToolResponse({
+                      safeSendToolResponse(session, {
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Google Meet opened in a new tab.` }
                         }]
                       });
-                    });
+                    }
                   }
                   
                   // SYSTEM COMMANDS
@@ -1503,16 +1548,16 @@ export default function App() {
                     try {
                       const result = await (window as any).electronAPI.runCommand(cmd);
                       addLog(`[SYS] Command ${result.success ? 'Success' : 'Failed'}`);
-                      sessionPromise.then(session => {
+                      if (sessionRef.current) { const session = sessionRef.current;
                         if (!isConnectedRef.current) return;
-                        session.sendToolResponse({
+                        safeSendToolResponse(session, {
                           functionResponses: [{
                             id: call.id,
                             name: call.name,
                             response: { success: result.success, output: result.output }
                           }]
                         });
-                      });
+                      }
                     } catch (err) {
                       addLog(`[ERROR] Command failed`);
                       console.error("Command execution failed:", err);
@@ -1573,6 +1618,10 @@ export default function App() {
       }
       processorRef.current = null;
     }
+    if (captureCtxRef.current) {
+      try { captureCtxRef.current.close(); } catch (e) {}
+      captureCtxRef.current = null;
+    }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
       streamRef.current = null;
@@ -1588,6 +1637,8 @@ export default function App() {
     setFocusedElement('none');
   };
 
+
+  
   // --- Auto-Connect on Unlock ---
   useEffect(() => {
     if (isUnlocked && connectionState === 'idle') {
@@ -1801,7 +1852,7 @@ export default function App() {
                     const callName = pendingScreenRequest.type === 'share' ? 'startScreenShare' : 'startScreenRecord';
                     setPendingScreenRequest(null);
                     
-                    sessionRef.current?.sendToolResponse({
+                    safeSendToolResponse(sessionRef.current, {
                       functionResponses: [{
                         id: callId,
                         name: callName,
@@ -1845,7 +1896,7 @@ export default function App() {
                             screenStreamRef.current = null;
                           };
 
-                          sessionRef.current?.sendToolResponse({
+                          safeSendToolResponse(sessionRef.current, {
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -1855,7 +1906,7 @@ export default function App() {
                         })
                         .catch(err => {
                           console.error("Screen share error", err);
-                          sessionRef.current?.sendToolResponse({
+                          safeSendToolResponse(sessionRef.current, {
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -1898,7 +1949,7 @@ export default function App() {
                           mediaRecorder.start();
                           setIsRecording(true);
 
-                          sessionRef.current?.sendToolResponse({
+                          safeSendToolResponse(sessionRef.current, {
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -1908,7 +1959,7 @@ export default function App() {
                         })
                         .catch(err => {
                           console.error("Screen record error", err);
-                          sessionRef.current?.sendToolResponse({
+                          safeSendToolResponse(sessionRef.current, {
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -2398,7 +2449,11 @@ export default function App() {
                   e.preventDefault();
                   if (!chatInput.trim() || !sessionRef.current) return;
                   try {
-                    sessionRef.current.sendRealtimeInput({ text: chatInput });
+                    const session = sessionRef.current;
+                    if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
+                      return;
+                    }
+                    session.sendRealtimeInput({ text: chatInput });
                   } catch (e: any) {
                     console.warn("Could not send chat message:", e.message);
                   }

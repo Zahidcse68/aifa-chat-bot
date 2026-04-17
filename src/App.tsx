@@ -7,29 +7,6 @@ import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from 'firebas
 import { doc, setDoc, onSnapshot, collection, deleteDoc } from 'firebase/firestore';
 import { auth, db } from './firebase';
 
-
-function safeSendToolResponse(session: any, response: any) {
-  try {
-    if (session) {
-      if (session.conn && (session.conn.readyState === WebSocket.CLOSING || session.conn.readyState === WebSocket.CLOSED)) {
-        return;
-      }
-      session.sendToolResponse(response);
-    }
-  } catch (e: any) {
-    console.warn('Could not send tool response:', e.message);
-  }
-}
-
-// --- Prevent WebSocket CLOSING/CLOSED native browser errors ---
-const originalWsSend = WebSocket.prototype.send;
-WebSocket.prototype.send = function(data) {
-  if (this.readyState === WebSocket.CLOSING || this.readyState === WebSocket.CLOSED) {
-    return; // Silently drop the message to prevent the native console error
-  }
-  return originalWsSend.call(this, data);
-};
-
 // Initialize Gemini API safely
 const apiKey = process.env.GEMINI_API_KEY;
 const ai = apiKey ? new GoogleGenAI({ apiKey }) : null;
@@ -208,13 +185,6 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [isScreenSharing, setIsScreenSharing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [isMobileScreen, setIsMobileScreen] = useState(typeof window !== 'undefined' ? window.innerWidth < 768 : false);
-
-  useEffect(() => {
-    const handleResize = () => setIsMobileScreen(window.innerWidth < 768);
-    window.addEventListener('resize', handleResize);
-    return () => window.removeEventListener('resize', handleResize);
-  }, []);
   const [pendingScreenRequest, setPendingScreenRequest] = useState<{id: string, type: 'share' | 'record'} | null>(null);
   const [showResetPassword, setShowResetPassword] = useState(false);
   const [resetPasswordInput, setResetPasswordInput] = useState('');
@@ -298,9 +268,8 @@ export default function App() {
   const isConnectedRef = useRef(false);
   const sessionRef = useRef<any>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
-  const captureCtxRef = useRef<AudioContext | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
-  const processorRef = useRef<any>(null);
+  const processorRef = useRef<ScriptProcessorNode | null>(null);
   const nextPlayTimeRef = useRef<number>(0);
   const activeSourcesRef = useRef<{source: AudioBufferSourceNode, gainNode: GainNode}[]>([]);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -392,22 +361,13 @@ export default function App() {
               setActiveAlarm(t.text);
               setTimeout(() => setActiveAlarm(null), 5000);
               
-              // Always speak locally so the user definitely hears it
-              speakText(`Master, reminder: ${t.text}`);
-              
-              // Notify Aifa about the alarm if connected
+              // Notify Aifa about the alarm if connected, otherwise speak locally
               if (isConnectedRef.current && sessionRef.current) {
-                try {
-                  const session = sessionRef.current;
-                  if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
-                    return;
-                  }
-                  session.sendRealtimeInput({
-                    text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}".`
-                  });
-                } catch (e: any) {
-                  console.warn("Could not send alarm alert:", e.message);
-                }
+                sessionRef.current.sendRealtimeInput([{
+                  text: `SYSTEM ALERT: A scheduled alarm/reminder just triggered for: "${t.text}". Please announce this to the user immediately.`
+                }]);
+              } else {
+                speakText(`Master, reminder: ${t.text}`);
               }
 
               return { ...t, alarmTriggered: true };
@@ -649,49 +609,14 @@ export default function App() {
       });
 
       const captureCtx = new AudioContextClass({ sampleRate: 16000 });
-      captureCtxRef.current = captureCtx;
-      if (captureCtx.state === 'suspended') {
-        await captureCtx.resume();
-      }
       const source = captureCtx.createMediaStreamSource(streamRef.current);
-      
-      const workletCode = `
-      class PCMProcessor extends AudioWorkletProcessor {
-        constructor() {
-          super();
-          this.buffer = new Float32Array(4096);
-          this.offset = 0;
-        }
-        process(inputs, outputs, parameters) {
-          const input = inputs[0];
-          if (input && input.length > 0) {
-            const channelData = input[0];
-            for (let i = 0; i < channelData.length; i++) {
-              this.buffer[this.offset++] = channelData[i];
-              if (this.offset >= 4096) {
-                this.port.postMessage(this.buffer);
-                this.buffer = new Float32Array(4096);
-                this.offset = 0;
-              }
-            }
-          }
-          return true;
-        }
-      }
-      registerProcessor('pcm-processor', PCMProcessor);
-      `;
-      const blob = new Blob([workletCode], { type: 'application/javascript' });
-      const workletUrl = URL.createObjectURL(blob);
-      
-      await captureCtx.audioWorklet.addModule(workletUrl);
-      const processor = new AudioWorkletNode(captureCtx, 'pcm-processor');
+      const processor = captureCtx.createScriptProcessor(4096, 1, 1);
       processorRef.current = processor;
 
       source.connect(processor);
       processor.connect(captureCtx.destination);
 
       const tools: any[] = [
-        { googleSearch: {} },
         {
           functionDeclarations: [
             {
@@ -718,26 +643,6 @@ export default function App() {
                   target: { type: Type.STRING, description: 'If action is focus, specify: monitor, orb, or tasks' }
                 },
                 required: ['action']
-              }
-            },
-            {
-              name: 'lockSystem',
-              description: 'Lock the user\'s operating system (Windows/Mac) or put the app into fullscreen lock mode.',
-              parameters: {
-                type: Type.OBJECT,
-                properties: {}
-              }
-            },
-            {
-              name: 'updateSourceCode',
-              description: 'Modify or update your own source code files. Use this to add new features to yourself.',
-              parameters: {
-                type: Type.OBJECT,
-                properties: {
-                  filePath: { type: Type.STRING, description: 'The path to the file to modify, e.g., src/App.tsx' },
-                  content: { type: Type.STRING, description: 'The new content to write to the file' }
-                },
-                required: ['filePath', 'content']
               }
             },
             {
@@ -874,20 +779,17 @@ export default function App() {
       ];
 
       if (isDesktop) {
-        const funcTool = tools.find(t => t.functionDeclarations);
-        if (funcTool) {
-          funcTool.functionDeclarations.push({
-            name: 'executeSystemCommand',
-            description: 'Executes a shell/terminal command on the users laptop. Use this to control system settings, open apps, send messages, or switch tabs.',
-            parameters: {
-              type: Type.OBJECT,
-              properties: {
-                command: { type: Type.STRING, description: 'The terminal command to execute' }
-              },
-              required: ['command']
-            }
-          });
-        }
+        tools[0].functionDeclarations.push({
+          name: 'executeSystemCommand',
+          description: 'Executes a shell/terminal command on the users laptop. Use this to control system settings, open apps, send messages, or switch tabs.',
+          parameters: {
+            type: Type.OBJECT,
+            properties: {
+              command: { type: Type.STRING, description: 'The terminal command to execute' }
+            },
+            required: ['command']
+          }
+        });
       }
 
       const recentHistory = chatMessages.slice(-10).map(m => `${m.sender === 'user' ? 'User' : 'Aifa'}: ${m.text}`).join('\n');
@@ -901,8 +803,8 @@ export default function App() {
         outputAudioTranscription: {},
         inputAudioTranscription: {},
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem', or lock his OS via 'lockSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. You have access to Google Search to find real-time information and do complex tasks. You can also update your own code using 'updateSourceCode' or 'executeSystemCommand' if the user asks you to add new features to yourself. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), log him out via 'logoutSystem', or lock the app via 'lockSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. You have access to Google Search to find real-time information and do complex tasks. You can also update your own code using 'updateSourceCode' if the user asks you to add new features to yourself. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`,
         tools: tools,
       };
 
@@ -916,10 +818,10 @@ export default function App() {
             setStatusText('LISTENING...');
             addLog(`[SYS] Neural link established. Welcome ${userName}.`);
             
-            processor.port.onmessage = (e) => {
+            processor.onaudioprocess = (e) => {
               if (!isConnectedRef.current) return;
 
-              const inputData = e.data;
+              const inputData = e.inputBuffer.getChannelData(0);
               const pcm16 = new Int16Array(inputData.length);
               let sum = 0;
               for (let i = 0; i < inputData.length; i++) {
@@ -941,19 +843,14 @@ export default function App() {
               }
               const base64Data = btoa(binary);
               
-              if (sessionRef.current) { const session = sessionRef.current;
+              sessionPromise.then(session => {
                 if (!isConnectedRef.current) return;
-                try {
-                  // Check if the underlying connection is still open before sending
-                  if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
-                    return;
-                  }
-                  session.sendRealtimeInput({ audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' } });
-                } catch (e: any) {
-                  console.warn("Could not send audio chunk, connection might be closed:", e.message);
-                  disconnect();
-                }
-              }
+                session.sendRealtimeInput({
+                  audio: { data: base64Data, mimeType: 'audio/pcm;rate=16000' }
+                });
+              }).catch(err => {
+                console.error("Error sending audio chunk:", err);
+              });
             };
 
             // Start video frame capture
@@ -976,22 +873,15 @@ export default function App() {
                 if (ctx) {
                   ctx.drawImage(videoToCapture, 0, 0, canvas.width, canvas.height);
                   const base64Data = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
-                  if (sessionRef.current) { const session = sessionRef.current;
+                  sessionPromise.then(session => {
                     if (isConnectedRef.current) {
-                      try {
-                        // Check if the underlying connection is still open before sending
-                        if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
-                          return;
-                        }
-                        session.sendRealtimeInput({
-                          video: { data: base64Data, mimeType: 'image/jpeg' }
-                        });
-                      } catch (e: any) {
-                        console.warn("Could not send video frame, connection might be closed:", e.message);
-                        disconnect();
-                      }
+                      session.sendRealtimeInput({
+                        video: { data: base64Data, mimeType: 'image/jpeg' }
+                      });
                     }
-                  }
+                  }).catch(err => {
+                    console.error("Error sending video frame:", err);
+                  });
                 }
               }
             }, 3000);
@@ -1057,15 +947,7 @@ export default function App() {
             }
 
             // Handle Audio Playback
-            let base64Audio = null;
-            if (message.serverContent?.modelTurn?.parts) {
-              for (const part of message.serverContent.modelTurn.parts) {
-                if (part.inlineData?.data) {
-                  base64Audio = part.inlineData.data;
-                  break;
-                }
-              }
-            }
+            const base64Audio = message.serverContent?.modelTurn?.parts?.[0]?.inlineData?.data;
             if (base64Audio && audioContextRef.current) {
               setIsSpeaking(true);
               setStatusText('PROCESSING...');
@@ -1157,16 +1039,16 @@ export default function App() {
                       responseMsg = `Current tasks: ${JSON.stringify(tasksRef.current)}`;
                     }
 
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: responseMsg }
                         }]
                       });
-                    }
+                    });
                   }
 
                   // HUD CONTROL
@@ -1196,16 +1078,16 @@ export default function App() {
                       });
                     }
 
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `HUD ${action} applied.` }
                         }]
                       });
-                    }
+                    });
                   }
                   
                   // LOGOUT SYSTEM
@@ -1216,94 +1098,16 @@ export default function App() {
                     setIsUnlocked(false);
                     setAuthStatus('locked');
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Logged out successfully.` }
                         }]
                       });
-                    }
-                  }
-
-                  // LOCK SYSTEM
-                  if (call.name === 'lockSystem') {
-                    addLog(`[SYS] Locking system...`);
-                    playSfx('auth_fail');
-                    disconnect();
-                    setIsUnlocked(false);
-                    setAuthStatus('locked');
-                    
-                    if (isDesktop && (window as any).electronAPI) {
-                      (window as any).electronAPI.executeCommand('rundll32.exe user32.dll,LockWorkStation || pmset displaysleepnow');
-                    }
-                    
-                    if (sessionRef.current) { const session = sessionRef.current;
-                      if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
-                        functionResponses: [{
-                          id: call.id,
-                          name: call.name,
-                          response: { success: true, message: `System locked successfully.` }
-                        }]
-                      });
-                    }
-                  }
-
-                  // UPDATE SOURCE CODE
-                  if (call.name === 'updateSourceCode') {
-                    const { filePath, content } = call.args;
-                    addLog(`[SYS] Updating source code: ${filePath}`);
-                    
-                    if (isDesktop && (window as any).electronAPI) {
-                      // We can use executeCommand to echo content to a file, or if we had a dedicated write file API.
-                      // For now, we'll simulate it or use a shell command to overwrite the file.
-                      // Note: In a real environment, writing complex files via shell echo is tricky due to escaping.
-                      // A proper node script would be better. We'll use a base64 decode approach.
-                      const base64Content = btoa(unescape(encodeURIComponent(content as string)));
-                      const command = process.platform === 'win32' 
-                        ? `powershell -Command "[IO.File]::WriteAllBytes('${filePath}', [Convert]::FromBase64String('${base64Content}'))"`
-                        : `echo "${base64Content}" | base64 --decode > "${filePath}"`;
-                        
-                      (window as any).electronAPI.executeCommand(command)
-                        .then(() => {
-                          if (sessionRef.current) { const session = sessionRef.current;
-                            if (!isConnectedRef.current) return;
-                            safeSendToolResponse(session, {
-                              functionResponses: [{
-                                id: call.id,
-                                name: call.name,
-                                response: { success: true, message: `Source code updated successfully. The dev server will restart automatically.` }
-                              }]
-                            });
-                          }
-                        })
-                        .catch((err: any) => {
-                          if (sessionRef.current) { const session = sessionRef.current;
-                            if (!isConnectedRef.current) return;
-                            safeSendToolResponse(session, {
-                              functionResponses: [{
-                                id: call.id,
-                                name: call.name,
-                                response: { success: false, message: `Failed to update source code: ${err}` }
-                              }]
-                            });
-                          }
-                        });
-                    } else {
-                      if (sessionRef.current) { const session = sessionRef.current;
-                        if (!isConnectedRef.current) return;
-                        safeSendToolResponse(session, {
-                          functionResponses: [{
-                            id: call.id,
-                            name: call.name,
-                            response: { success: false, message: `Cannot update source code in web sandbox. Must be running locally.` }
-                          }]
-                        });
-                      }
-                    }
+                    });
                   }
 
                   // SET SYSTEM STATUS
@@ -1313,16 +1117,16 @@ export default function App() {
                     setSystemStatus(status as any);
                     if (status === 'Alert') playSfx('auth_fail');
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `System status set to ${status}.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   // TOGGLE CAMERA
@@ -1333,16 +1137,16 @@ export default function App() {
                     addLog(`[SYS] Camera ${isOpen ? 'opened' : 'closed'}`);
                     playSfx('task_action');
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Camera ${isOpen ? 'opened' : 'closed'}.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   // TOGGLE CHAT
@@ -1353,16 +1157,16 @@ export default function App() {
                     addLog(`[SYS] Chat ${isOpen ? 'opened' : 'closed'}`);
                     playSfx('task_action');
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Chat ${isOpen ? 'opened' : 'closed'}.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   // CONNECT TO IP
@@ -1372,16 +1176,16 @@ export default function App() {
                     addLog(`[SYS] Connected to IP: ${ip}`);
                     playSfx('task_action');
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Connected to IP: ${ip}.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   // SEND IP COMMAND
@@ -1395,16 +1199,16 @@ export default function App() {
                       addLog(`[IP CMD] Response received: OK`);
                     }, 500);
 
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Command ${command} sent successfully.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   if (call.name === 'startScreenShare') {
@@ -1424,16 +1228,16 @@ export default function App() {
                     isScreenSharingRef.current = false;
                     setIsScreenSharing(false);
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Screen sharing stopped.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   if (call.name === 'startScreenRecord') {
@@ -1451,16 +1255,16 @@ export default function App() {
                     }
                     setIsRecording(false);
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Screen recording stopped and file saved.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   if (call.name === 'createAndSaveTextFile') {
@@ -1476,16 +1280,16 @@ export default function App() {
                     a.click();
                     URL.revokeObjectURL(url);
                     
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `File ${filename} created and downloaded.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   if (call.name === 'sendWhatsApp') {
@@ -1506,16 +1310,16 @@ export default function App() {
                       window.open(`https://web.whatsapp.com/send?phone=${phone}&text=${encodeURIComponent(text as string)}`, '_blank');
                     }
 
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `WhatsApp message initiated.` }
                         }]
                       });
-                    }
+                    });
                   }
 
                   if (call.name === 'openGoogleMeet') {
@@ -1526,16 +1330,16 @@ export default function App() {
                     const url = meetingCode ? `https://meet.google.com/${meetingCode}` : 'https://meet.google.com/new';
                     window.open(url, '_blank');
 
-                    if (sessionRef.current) { const session = sessionRef.current;
+                    sessionPromise.then(session => {
                       if (!isConnectedRef.current) return;
-                      safeSendToolResponse(session, {
+                      session.sendToolResponse({
                         functionResponses: [{
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: `Google Meet opened in a new tab.` }
                         }]
                       });
-                    }
+                    });
                   }
                   
                   // SYSTEM COMMANDS
@@ -1548,16 +1352,16 @@ export default function App() {
                     try {
                       const result = await (window as any).electronAPI.runCommand(cmd);
                       addLog(`[SYS] Command ${result.success ? 'Success' : 'Failed'}`);
-                      if (sessionRef.current) { const session = sessionRef.current;
+                      sessionPromise.then(session => {
                         if (!isConnectedRef.current) return;
-                        safeSendToolResponse(session, {
+                        session.sendToolResponse({
                           functionResponses: [{
                             id: call.id,
                             name: call.name,
                             response: { success: result.success, output: result.output }
                           }]
                         });
-                      }
+                      });
                     } catch (err) {
                       addLog(`[ERROR] Command failed`);
                       console.error("Command execution failed:", err);
@@ -1611,16 +1415,8 @@ export default function App() {
     }
     if (processorRef.current) {
       try { processorRef.current.disconnect(); } catch (e) {}
-      if (processorRef.current.port) {
-        processorRef.current.port.onmessage = null;
-      } else {
-        processorRef.current.onaudioprocess = null;
-      }
+      processorRef.current.onaudioprocess = null;
       processorRef.current = null;
-    }
-    if (captureCtxRef.current) {
-      try { captureCtxRef.current.close(); } catch (e) {}
-      captureCtxRef.current = null;
     }
     if (streamRef.current) {
       streamRef.current.getTracks().forEach(track => track.stop());
@@ -1637,8 +1433,6 @@ export default function App() {
     setFocusedElement('none');
   };
 
-
-  
   // --- Auto-Connect on Unlock ---
   useEffect(() => {
     if (isUnlocked && connectionState === 'idle') {
@@ -1852,7 +1646,7 @@ export default function App() {
                     const callName = pendingScreenRequest.type === 'share' ? 'startScreenShare' : 'startScreenRecord';
                     setPendingScreenRequest(null);
                     
-                    safeSendToolResponse(sessionRef.current, {
+                    sessionRef.current?.sendToolResponse({
                       functionResponses: [{
                         id: callId,
                         name: callName,
@@ -1896,7 +1690,7 @@ export default function App() {
                             screenStreamRef.current = null;
                           };
 
-                          safeSendToolResponse(sessionRef.current, {
+                          sessionRef.current?.sendToolResponse({
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -1906,7 +1700,7 @@ export default function App() {
                         })
                         .catch(err => {
                           console.error("Screen share error", err);
-                          safeSendToolResponse(sessionRef.current, {
+                          sessionRef.current?.sendToolResponse({
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -1949,7 +1743,7 @@ export default function App() {
                           mediaRecorder.start();
                           setIsRecording(true);
 
-                          safeSendToolResponse(sessionRef.current, {
+                          sessionRef.current?.sendToolResponse({
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -1959,7 +1753,7 @@ export default function App() {
                         })
                         .catch(err => {
                           console.error("Screen record error", err);
-                          safeSendToolResponse(sessionRef.current, {
+                          sessionRef.current?.sendToolResponse({
                             functionResponses: [{
                               id: callId,
                               name: callName,
@@ -1984,7 +1778,7 @@ export default function App() {
 
       {/* HUD Container (Animated for Zoom/Pan) */}
       <motion.div 
-        className="flex flex-col md:flex-row flex-1 w-full relative z-10 overflow-y-auto overflow-x-hidden md:overflow-hidden custom-scrollbar"
+        className="flex flex-1 w-full relative z-10"
         animate={{ 
           scale: hudTransform.scale, 
           x: hudTransform.x, 
@@ -1994,14 +1788,14 @@ export default function App() {
       >
         {/* Left Panel: System Monitor */}
         <motion.aside 
-          drag={!isMobileScreen}
+          drag
           dragMomentum={false}
           animate={{ 
-            scale: focusedElement === 'monitor' && !isMobileScreen ? 1.05 : 1,
+            scale: focusedElement === 'monitor' ? 1.1 : 1,
             zIndex: focusedElement === 'monitor' ? 50 : 20,
             boxShadow: focusedElement === 'monitor' ? (isAlert ? '0 0 50px rgba(239,68,68,0.2)' : '0 0 50px rgba(6,182,212,0.2)') : 'none'
           }}
-          className={`w-full md:w-80 min-h-[400px] md:min-h-0 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500 relative md:absolute md:left-0 md:top-0 md:bottom-0 cursor-move`}
+          className={`w-80 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-left transition-all duration-500 absolute left-0 top-0 bottom-0 cursor-move`}
         >
           <div className={`p-6 border-b ${borderColor}`}>
             <div className="flex items-center gap-3 mb-4">
@@ -2057,25 +1851,24 @@ export default function App() {
         </motion.aside>
 
         {/* Center Panel: Orb & Controls */}
-        <main className="flex-1 min-h-[500px] md:min-h-0 flex flex-col relative overflow-hidden pointer-events-none">
+        <main className="flex-1 flex flex-col relative overflow-hidden pointer-events-none">
           {/* Header */}
-          <header className="absolute top-0 w-full p-4 md:p-6 md:px-[340px] flex justify-between items-center z-20 pointer-events-none">
-            <div className="flex items-center gap-2 md:gap-3">
-              <div className={`p-1.5 md:p-2 ${isAlert ? 'bg-red-500/10 border-red-500/20' : 'bg-cyan-500/10 border-cyan-500/20'} rounded-xl border`}>
-                <Crosshair className={`w-4 h-4 md:w-5 md:h-5 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
+          <header className="absolute top-0 w-full p-6 flex justify-between items-center z-20 pointer-events-none">
+            <div className="flex items-center gap-3">
+              <div className={`p-2 ${isAlert ? 'bg-red-500/10 border-red-500/20' : 'bg-cyan-500/10 border-cyan-500/20'} rounded-xl border`}>
+                <Crosshair className={`w-5 h-5 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`} />
               </div>
               <div>
-                <h1 className={`font-semibold text-sm md:text-xl tracking-widest ${isAlert ? 'text-red-100' : 'text-cyan-100'} uppercase`}>Aifa - My Personal Assistant</h1>
-                <p className={`text-[10px] md:text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} font-mono tracking-widest`}>
+                <h1 className={`font-semibold text-xl tracking-widest ${isAlert ? 'text-red-100' : 'text-cyan-100'} uppercase`}>Aifa - My Personal Assistant</h1>
+                <p className={`text-xs ${isAlert ? 'text-red-600' : 'text-cyan-600'} font-mono tracking-widest`}>
                   MK-V // {isDesktop ? 'LOCAL HOST' : 'SANDBOX'}
                 </p>
               </div>
             </div>
             {!isDesktop && (
-              <div className={`pointer-events-auto flex items-center gap-1 md:gap-2 ${isAlert ? 'text-red-400 bg-red-500/10 border-red-500/20' : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'} font-mono text-[10px] md:text-xs px-2 py-1 md:px-3 md:py-1.5 rounded-full border`}>
+              <div className={`pointer-events-auto flex items-center gap-2 ${isAlert ? 'text-red-400 bg-red-500/10 border-red-500/20' : 'text-cyan-400 bg-cyan-500/10 border-cyan-500/20'} font-mono text-xs px-3 py-1.5 rounded-full border`}>
                 <Download className="w-3 h-3" />
-                <span className="hidden sm:inline">npm run dev:desktop</span>
-                <span className="sm:hidden">desktop</span>
+                <span>npm run dev:desktop</span>
               </div>
             )}
           </header>
@@ -2083,10 +1876,10 @@ export default function App() {
           {/* Orb Area (Iron Man Style HUD) */}
           <motion.div 
             animate={{ 
-              scale: focusedElement === 'orb' && !isMobileScreen ? 1.1 : 1,
+              scale: focusedElement === 'orb' ? 1.2 : 1,
               zIndex: focusedElement === 'orb' ? 50 : 10
             }}
-            className="flex-1 flex flex-col items-center justify-center relative transition-all duration-500 mt-16 md:mt-0"
+            className="flex-1 flex flex-col items-center justify-center relative transition-all duration-500"
           >
             
             {/* Rotating HUD Rings */}
@@ -2094,17 +1887,17 @@ export default function App() {
               <motion.div 
                 animate={{ rotate: 360 }} 
                 transition={{ duration: 40, repeat: Infinity, ease: "linear" }}
-                className={`absolute w-[300px] h-[300px] md:w-[700px] md:h-[700px] rounded-full border border-dashed ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'}`}
+                className={`absolute w-[700px] h-[700px] rounded-full border border-dashed ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'}`}
               />
               <motion.div 
                 animate={{ rotate: -360 }} 
                 transition={{ duration: 30, repeat: Infinity, ease: "linear" }}
-                className={`absolute w-[240px] h-[240px] md:w-[550px] md:h-[550px] rounded-full border-2 border-dotted ${isAlert ? 'border-red-400/20' : 'border-cyan-400/20'}`}
+                className={`absolute w-[550px] h-[550px] rounded-full border-2 border-dotted ${isAlert ? 'border-red-400/20' : 'border-cyan-400/20'}`}
               />
               <motion.div 
                 animate={{ rotate: 360 }} 
                 transition={{ duration: 20, repeat: Infinity, ease: "linear" }}
-                className={`absolute w-[180px] h-[180px] md:w-[400px] md:h-[400px] rounded-full border ${isAlert ? 'border-red-300/10' : 'border-cyan-300/10'}`}
+                className={`absolute w-[400px] h-[400px] rounded-full border ${isAlert ? 'border-red-300/10' : 'border-cyan-300/10'}`}
               />
             </div>
 
@@ -2114,7 +1907,7 @@ export default function App() {
                 scale: isSpeaking ? 1.2 : 1
               }}
               transition={{ duration: 2, repeat: Infinity, repeatType: "reverse" }}
-              className={`absolute w-[250px] h-[250px] md:w-[600px] md:h-[600px] ${isAlert ? 'bg-red-600' : 'bg-cyan-600'} rounded-full blur-[100px] md:blur-[150px] pointer-events-none`}
+              className={`absolute w-[600px] h-[600px] ${isAlert ? 'bg-red-600' : 'bg-cyan-600'} rounded-full blur-[150px] pointer-events-none`}
             />
 
             <div className="relative z-10 flex flex-col items-center pointer-events-auto">
@@ -2134,51 +1927,51 @@ export default function App() {
                   repeat: Infinity,
                   ease: "easeInOut"
                 }}
-                className={`w-32 h-32 md:w-56 md:h-56 rounded-full flex items-center justify-center transition-all duration-500 ${
+                className={`w-56 h-56 rounded-full flex items-center justify-center transition-all duration-500 ${
                   connectionState === 'connected' 
                     ? `bg-neutral-950 border-2 ${isAlert ? 'border-red-400/50' : 'border-cyan-400/50'}` 
                     : `bg-neutral-950 border-2 border-neutral-800 hover:${isAlert ? 'border-red-500/50' : 'border-cyan-500/50'} hover:bg-neutral-900 disabled:opacity-50 disabled:cursor-not-allowed`
                 }`}
               >
                 {connectionState === 'connected' ? (
-                  <div className={`absolute inset-2 md:inset-4 rounded-full border ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'} flex items-center justify-center overflow-hidden`}>
+                  <div className={`absolute inset-4 rounded-full border ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'} flex items-center justify-center overflow-hidden`}>
                     <motion.div 
                       animate={{ rotate: 360 }}
                       transition={{ duration: 5, repeat: Infinity, ease: "linear" }}
                       className={`absolute inset-0 ${isAlert ? 'bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(239,68,68,0.6)_360deg)]' : 'bg-[conic-gradient(from_0deg,transparent_0_340deg,rgba(6,182,212,0.6)_360deg)]'}`}
                     />
                     <div className="absolute inset-1 bg-neutral-950 rounded-full flex items-center justify-center">
-                      <div className={`w-16 h-16 md:w-32 md:h-32 rounded-full blur-xl md:blur-2xl ${isSpeaking ? (isAlert ? 'bg-red-300/60' : 'bg-cyan-300/60') : (isAlert ? 'bg-red-600/30' : 'bg-cyan-600/30')}`} />
+                      <div className={`w-32 h-32 rounded-full blur-2xl ${isSpeaking ? (isAlert ? 'bg-red-300/60' : 'bg-cyan-300/60') : (isAlert ? 'bg-red-600/30' : 'bg-cyan-600/30')}`} />
                       <div className="relative flex items-center justify-center">
-                        <Hexagon className={`absolute w-8 h-8 md:w-16 md:h-16 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_10s_linear_infinite]`} />
-                        <Aperture className={`absolute w-4 h-4 md:w-8 md:h-8 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_4s_linear_infinite_reverse]`} />
+                        <Hexagon className={`absolute w-16 h-16 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_10s_linear_infinite]`} />
+                        <Aperture className={`absolute w-8 h-8 ${isSpeaking ? (isAlert ? 'text-red-100' : 'text-cyan-100') : (isAlert ? 'text-red-500/50' : 'text-cyan-500/50')} animate-[spin_4s_linear_infinite_reverse]`} />
                       </div>
                     </div>
                   </div>
                 ) : connectionState === 'connecting' ? (
-                  <div className="flex flex-col items-center gap-2 md:gap-4">
-                    <Loader2 className={`w-6 h-6 md:w-10 md:h-10 ${isAlert ? 'text-red-500' : 'text-cyan-500'} animate-spin`} />
-                    <span className={`font-mono text-[10px] md:text-xs ${isAlert ? 'text-red-500' : 'text-cyan-500'} tracking-widest`}>INITIALIZING</span>
+                  <div className="flex flex-col items-center gap-4">
+                    <Loader2 className={`w-10 h-10 ${isAlert ? 'text-red-500' : 'text-cyan-500'} animate-spin`} />
+                    <span className={`font-mono text-xs ${isAlert ? 'text-red-500' : 'text-cyan-500'} tracking-widest`}>INITIALIZING</span>
                   </div>
                 ) : (
                   <div className="relative flex items-center justify-center">
-                    <Hexagon className="absolute w-8 h-8 md:w-16 md:h-16 text-neutral-700" />
-                    <Aperture className="absolute w-4 h-4 md:w-8 md:h-8 text-neutral-700" />
+                    <Hexagon className="absolute w-16 h-16 text-neutral-700" />
+                    <Aperture className="absolute w-8 h-8 text-neutral-700" />
                   </div>
                 )}
               </motion.button>
 
-              <div className="mt-8 md:mt-16 text-center h-16">
+              <div className="mt-16 text-center h-16">
                 <motion.p 
                   key={statusText}
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
-                  className={`text-lg md:text-2xl font-light tracking-[0.2em] md:tracking-[0.3em] ${connectionState === 'connected' ? (isAlert ? 'text-red-100' : 'text-cyan-100') : 'text-neutral-600'}`}
+                  className={`text-2xl font-light tracking-[0.3em] ${connectionState === 'connected' ? (isAlert ? 'text-red-100' : 'text-cyan-100') : 'text-neutral-600'}`}
                 >
                   {statusText}
                 </motion.p>
                 {connectionState === 'connected' && !isSpeaking && (
-                  <p className={`text-[10px] md:text-xs font-mono ${isAlert ? 'text-red-500/60' : 'text-cyan-500/60'} mt-2 md:mt-3 animate-pulse tracking-widest`}>
+                  <p className={`text-xs font-mono ${isAlert ? 'text-red-500/60' : 'text-cyan-500/60'} mt-3 animate-pulse tracking-widest`}>
                     AWAITING VOICE INPUT...
                   </p>
                 )}
@@ -2187,11 +1980,11 @@ export default function App() {
           </motion.div>
 
           {/* Footer */}
-          <footer className="p-4 md:p-8 flex justify-center z-20 pointer-events-auto">
+          <footer className="p-8 flex justify-center z-20 pointer-events-auto">
             <button
               onClick={connectionState === 'connected' ? disconnect : connect}
               disabled={connectionState === 'connecting'}
-              className={`flex items-center gap-2 md:gap-3 px-6 py-3 md:px-10 md:py-4 rounded-none border font-mono text-xs md:text-sm tracking-widest transition-all ${
+              className={`flex items-center gap-3 px-10 py-4 rounded-none border font-mono text-sm tracking-widest transition-all ${
                 connectionState === 'connected' 
                   ? 'bg-red-950/30 text-red-400 hover:bg-red-900/40 border-red-500/30' 
                   : `${isAlert ? 'bg-red-950/30 text-red-400 hover:bg-red-900/40 border-red-500/30 hover:shadow-[0_0_20px_rgba(239,68,68,0.2)]' : 'bg-cyan-950/30 text-cyan-400 hover:bg-cyan-900/40 border-cyan-500/30 hover:shadow-[0_0_20px_rgba(6,182,212,0.2)]'} disabled:opacity-50 disabled:cursor-not-allowed`
@@ -2219,14 +2012,14 @@ export default function App() {
 
         {/* Right Panel: Tasks & Schedule */}
         <motion.aside 
-          drag={!isMobileScreen}
+          drag
           dragMomentum={false}
           animate={{ 
-            scale: focusedElement === 'tasks' && !isMobileScreen ? 1.05 : 1,
+            scale: focusedElement === 'tasks' ? 1.1 : 1,
             zIndex: focusedElement === 'tasks' ? 50 : 20,
             boxShadow: focusedElement === 'tasks' ? (isAlert ? '0 0 50px rgba(239,68,68,0.2)' : '0 0 50px rgba(6,182,212,0.2)') : 'none'
           }}
-          className={`w-full md:w-80 min-h-[400px] md:min-h-0 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500 relative md:absolute md:right-0 md:top-0 md:bottom-0 cursor-move`}
+          className={`w-80 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col origin-right transition-all duration-500 absolute right-0 top-0 bottom-0 cursor-move`}
         >
           
           {/* Next Execution Widget */}
@@ -2302,9 +2095,10 @@ export default function App() {
         </motion.aside>
         {/* Weather Panel */}
         <motion.aside
-          drag={!isMobileScreen}
+          drag
           dragMomentum={false}
-          className={`w-full md:w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col relative md:absolute md:left-[350px] md:top-[100px] cursor-move z-30 my-4 md:my-0`}
+          initial={{ x: 350, y: 100 }}
+          className={`w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30`}
         >
           <div className={`p-4 border-b ${borderColor}`}>
             <div className="flex items-center gap-2 mb-2">
@@ -2337,9 +2131,10 @@ export default function App() {
 
         {/* Room Conditions Panel */}
         <motion.aside
-          drag={!isMobileScreen}
+          drag
           dragMomentum={false}
-          className={`w-full md:w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col relative md:absolute md:left-[350px] md:top-[450px] cursor-move z-30 mb-4 md:mb-0`}
+          initial={{ x: 350, y: 450 }}
+          className={`w-72 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-30`}
         >
           <div className={`p-4 border-b ${borderColor}`}>
             <div className="flex items-center gap-2 mb-2">
@@ -2383,12 +2178,12 @@ export default function App() {
         <AnimatePresence>
           {isCameraOpen && (
             <motion.aside
-              drag={!isMobileScreen}
+              drag
               dragMomentum={false}
-              initial={{ opacity: 0, scale: 0.8 }}
+              initial={{ opacity: 0, scale: 0.8, x: 50, y: 50 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.8 }}
-              className={`w-full md:w-64 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col relative md:absolute md:left-[50px] md:top-[50px] cursor-move z-40 mb-4 md:mb-0`}
+              className={`w-64 border ${borderColor} bg-neutral-950/80 backdrop-blur-md flex flex-col absolute cursor-move z-40`}
             >
               <div className={`p-2 border-b ${borderColor} flex justify-between items-center`}>
                 <div className="flex items-center gap-2">
@@ -2416,12 +2211,12 @@ export default function App() {
         <AnimatePresence>
           {isChatOpen && (
             <motion.aside
-              drag={!isMobileScreen}
+              drag
               dragMomentum={false}
-              initial={{ opacity: 0, scale: 0.8 }}
+              initial={{ opacity: 0, scale: 0.8, x: 50, y: 300 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.8 }}
-              className={`w-full md:w-80 border ${borderColor} bg-neutral-950/90 backdrop-blur-md flex flex-col relative md:absolute md:left-[50px] md:top-[300px] cursor-move z-40 mb-4 md:mb-0`}
+              className={`w-80 border ${borderColor} bg-neutral-950/90 backdrop-blur-md flex flex-col absolute cursor-move z-40`}
             >
               <div className={`p-2 border-b ${borderColor} flex justify-between items-center`}>
                 <div className="flex items-center gap-2">
@@ -2448,15 +2243,7 @@ export default function App() {
                 <form onSubmit={(e) => {
                   e.preventDefault();
                   if (!chatInput.trim() || !sessionRef.current) return;
-                  try {
-                    const session = sessionRef.current;
-                    if ((session as any).conn && ((session as any).conn.readyState === WebSocket.CLOSING || (session as any).conn.readyState === WebSocket.CLOSED)) {
-                      return;
-                    }
-                    session.sendRealtimeInput({ text: chatInput });
-                  } catch (e: any) {
-                    console.warn("Could not send chat message:", e.message);
-                  }
+                  sessionRef.current.sendRealtimeInput([{ text: chatInput }]);
                   setChatMessages(prev => [...prev, { sender: 'user', text: chatInput, isFinished: true }]);
                   addLog(`[USER] ${chatInput}`);
                   setChatInput('');

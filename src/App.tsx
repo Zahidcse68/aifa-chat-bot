@@ -1,6 +1,7 @@
 import { GoogleGenAI, LiveServerMessage, Modality, Type } from '@google/genai';
 import * as faceapi from '@vladmandic/face-api';
-import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Cloud, Crosshair, Download, Droplets, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, ShieldCheck, Square, Terminal, Thermometer, UserPlus, Wind } from 'lucide-react';
+import { Activity, Aperture, Bell, BellRing, CheckSquare, Clock, Cloud, Crosshair, Download, Droplets, Fingerprint, Globe, Hexagon, Loader2, Lock, Mic, MicOff, Monitor, Presentation, ShieldCheck, Square, Terminal, Thermometer, UserPlus, Wind, Pen, Eraser, Send, Palette, LayoutTemplate } from 'lucide-react';
+import Markdown from 'react-markdown';
 import { motion, AnimatePresence } from 'motion/react';
 import React, { useEffect, useRef, useState } from 'react';
 import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged } from 'firebase/auth';
@@ -190,12 +191,26 @@ export default function App() {
   const [resetPasswordInput, setResetPasswordInput] = useState('');
   const [chatInput, setChatInput] = useState('');
   const [chatMessages, setChatMessages] = useState<{sender: 'user'|'aifa', text: string, isFinished?: boolean}[]>(() => {
-    const saved = localStorage.getItem('aifa_chat_history');
+    const saved = localStorage.getItem('aifa_chat_history_local');
     return saved ? JSON.parse(saved) : [];
   });
+  
+  const [isWhiteboardOpen, setIsWhiteboardOpen] = useState(false);
+  const [whiteboardContent, setWhiteboardContent] = useState<string>('');
+  
+  // Custom Whiteboard Drawing & Styling
+  const [boardBg, setBoardBg] = useState('#0a0a0a');
+  const [boardColor, setBoardColor] = useState('#06b6d4');
+  const [isDrawingMode, setIsDrawingMode] = useState(false);
+  const drawCanvasRef = useRef<HTMLCanvasElement>(null);
+  const isDrawingCanvasRef = useRef(false);
+  const lastPosRef = useRef<{x: number, y: number} | null>(null);
+
+  // Self Update Widgets
+  const [customWidgets, setCustomWidgets] = useState<{id: string, name: string, code: string}[]>([]);
 
   useEffect(() => {
-    localStorage.setItem('aifa_chat_history', JSON.stringify(chatMessages));
+    localStorage.setItem('aifa_chat_history_local', JSON.stringify(chatMessages));
   }, [chatMessages]);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
@@ -241,7 +256,13 @@ export default function App() {
   const [connectionState, setConnectionState] = useState<'idle' | 'connecting' | 'connected'>('idle');
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [statusText, setStatusText] = useState('SYSTEM STANDBY');
-  
+
+  useEffect(() => {
+    if (userId) {
+      setDoc(doc(db, `users/${userId}/preferences/chat_history`), { userId: userId, messages: chatMessages }, { merge: true }).catch(console.error);
+    }
+  }, [chatMessages, userId]);
+
   // HUD State
   const [time, setTime] = useState(new Date());
   const [ipAddress, setIpAddress] = useState('Fetching...');
@@ -326,10 +347,29 @@ export default function App() {
         }
       }
     });
+
+    const unsubChat = onSnapshot(doc(db, `users/${userId}/preferences/chat_history`), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.messages && data.messages.length > 0) {
+          setChatMessages(data.messages);
+        }
+      }
+    });
+
+    const unsubWidgets = onSnapshot(doc(db, `users/${userId}/preferences/custom_widgets`), (docSnap) => {
+      if (docSnap.exists()) {
+        const data = docSnap.data();
+        if (data.widgets) setCustomWidgets(data.widgets);
+      }
+    });
+
     return () => {
       unsubTasks();
       unsubMemories();
       unsubPrefs();
+      unsubChat();
+      unsubWidgets();
     };
   }, [userId]);
 
@@ -820,6 +860,43 @@ export default function App() {
                   meetingCode: { type: Type.STRING, description: 'Optional meeting code or link to join. Leave empty to start a new meeting.' }
                 }
               }
+            },
+            {
+              name: 'updateWhiteboard',
+              description: 'Open, close, clear, or step-by-step write content on a large visual whiteboard in the center HUD. Use this explicitly when the user asks you to "teach" or write things step by step.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  action: { type: Type.STRING, description: 'open, close, clear, or append' },
+                  content: { type: Type.STRING, description: 'The text or markdown content to append to the whiteboard (used when action is "append")' }
+                },
+                required: ['action']
+              }
+            },
+            {
+              name: 'addWhiteboardImage',
+              description: 'Generate and display an image on the whiteboard based on a text prompt to provide visual examples or diagrams.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  prompt: { type: Type.STRING, description: 'A highly detailed visual prompt for the image to generate.' },
+                  caption: { type: Type.STRING, description: 'A short caption to display below the image.' }
+                },
+                required: ['prompt']
+              }
+            },
+            {
+              name: 'createFeatureWidget',
+              description: 'Self-update or extend your own configuration by injecting a brand new executable visual feature widget directly onto the screen. Use this when the user asks you to write code, create an applet, add new capabilities to yourself, or if they want you to write custom code for them.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  id: { type: Type.STRING, description: 'Unique alphanumeric ID for the widget' },
+                  name: { type: Type.STRING, description: 'Short display name of the widget' },
+                  code: { type: Type.STRING, description: 'Valid HTML document containing inline CSS and JavaScript for the feature. Must be a completely valid standalone web page. Use modern CSS.' }
+                },
+                required: ['id', 'name', 'code']
+              }
             }
           ]
         }
@@ -839,7 +916,7 @@ export default function App() {
         });
       }
 
-      const recentHistory = chatMessages.slice(-10).map(m => `${m.sender === 'user' ? 'User' : 'Aifa'}: ${m.text}`).join('\n');
+      const recentHistory = chatMessages.slice(-40).map(m => `${m.sender === 'user' ? 'User' : 'Aifa'}: ${m.text}`).join('\n');
       const historyContext = recentHistory ? `\n\nHere is the recent conversation history for context:\n${recentHistory}` : '';
 
       const config: any = {
@@ -850,8 +927,8 @@ export default function App() {
         outputAudioTranscription: {},
         inputAudioTranscription: {},
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}\n\nPermanent Memories: ${JSON.stringify(memories)} \n\nSelf-Updated Custom Instructions: ${customInstruction}`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}\n\nPermanent Memories: ${JSON.stringify(memories)} \n\nSelf-Updated Custom Instructions: ${customInstruction}`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something. Use 'updateWhiteboard' to open and write on a visual teaching board step-by-step when asked to teach or explain an expression. Use 'addWhiteboardImage' to generate and place vivid images directly on the whiteboard during explanations. Use 'createFeatureWidget' to self-update by actually deploying runnable HTML/JS applications in iframes directly onto the HUD if the user wants code written or custom features added.${historyContext}\n\nPermanent Memories: ${JSON.stringify(memories)} \n\nSelf-Updated Custom Instructions: ${customInstruction}`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something. Use 'updateWhiteboard' to open and write on a visual teaching board step-by-step when asked to teach or explain an expression. Use 'addWhiteboardImage' to generate and place vivid images directly on the whiteboard during explanations. Use 'createFeatureWidget' to self-update by actually deploying runnable HTML/JS applications in iframes directly onto the HUD if the user wants code written or custom features added.${historyContext}\n\nPermanent Memories: ${JSON.stringify(memories)} \n\nSelf-Updated Custom Instructions: ${customInstruction}`,
         tools: tools,
       };
 
@@ -1041,6 +1118,13 @@ export default function App() {
             if (message.serverContent?.interrupted) {
               fadeOutAndStopAllAudio();
               if (isConnectedRef.current) setStatusText('LISTENING...');
+            }
+
+            if (message.goAway) {
+              console.warn("Received goAway message from Live API. Reconnecting...");
+              addLog('[SYS] Link expiring. Re-establishing link...');
+              disconnect();
+              return;
             }
 
             if (message.toolCall) {
@@ -1282,7 +1366,7 @@ export default function App() {
                   // CONNECT TO IP
                   if (call.name === 'connectToIp') {
                     const { ip } = call.args;
-                    setConnectedIp(ip);
+                    setConnectedIp(ip as string);
                     addLog(`[SYS] Connected to IP: ${ip}`);
                     playSfx('task_action');
                     
@@ -1452,6 +1536,91 @@ export default function App() {
                     });
                   }
                   
+                  // WHITEBOARD MANAGEMENT
+                  if (call.name === 'updateWhiteboard') {
+                    const { action, content } = call.args;
+                    addLog(`[BOARD] ${action} ${content ? '...' : ''}`);
+                    playSfx('task_action');
+                    
+                    let responseMsg = `Whiteboard ${action} successful.`;
+                    
+                    if (action === 'open') {
+                      setIsWhiteboardOpen(true);
+                      setFocusedElement('none');
+                    } else if (action === 'close') {
+                      setIsWhiteboardOpen(false);
+                    } else if (action === 'clear') {
+                      setWhiteboardContent('');
+                    } else if (action === 'append' && content) {
+                      setIsWhiteboardOpen(true);
+                      setWhiteboardContent(prev => prev + (prev.length > 0 ? "\n\n" : "") + (content as string));
+                    }
+
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: responseMsg }
+                        }]
+                      });
+                    });
+                  }
+
+                  if (call.name === 'addWhiteboardImage') {
+                    const { prompt, caption } = call.args;
+                    addLog(`[BOARD] Generating image: ${prompt}`);
+                    playSfx('task_action');
+                    
+                    const timeSeed = Date.now();
+                    const safePrompt = encodeURIComponent(prompt as string);
+                    const imageUrl = `https://image.pollinations.ai/prompt/${safePrompt}?width=800&height=400&nologo=true&seed=${timeSeed}`;
+                    const markdownImage = `\n\n![${(caption as string) || 'Generated Image'}](${imageUrl})\n${caption ? `*${(caption as string)}*\n\n` : ''}`;
+                    
+                    setIsWhiteboardOpen(true);
+                    setWhiteboardContent(prev => prev + markdownImage);
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Image generated and added to whiteboard.` }
+                        }]
+                      });
+                    });
+                  }
+
+                  if (call.name === 'createFeatureWidget') {
+                    const { id, name, code } = call.args;
+                    addLog(`[SYSTEM] Constructing and deploying custom widget: ${name}`);
+                    playSfx('task_action');
+                    
+                    const newWidget = { id: id as string, name: name as string, code: code as string };
+                    
+                    setCustomWidgets(prev => {
+                      const filtered = prev.filter(w => w.id !== newWidget.id);
+                      const updated = [...filtered, newWidget];
+                      if (userId) {
+                        setDoc(doc(db, `users/${userId}/preferences/custom_widgets`), { widgets: updated }, { merge: true }).catch(console.error);
+                      }
+                      return updated;
+                    });
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `Custom widget framework '${name}' generated and deployed successfully into the workspace interface.` }
+                        }]
+                      });
+                    });
+                  }
+
                   // SYSTEM COMMANDS
                   if (call.name === 'executeSystemCommand') {
                     const cmd = call.args.command as string;
@@ -1993,7 +2162,7 @@ export default function App() {
           >
             
             {/* Rotating HUD Rings */}
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none opacity-30">
+            <div className={`absolute inset-0 flex items-center justify-center pointer-events-none transition-all duration-700 opacity-30`}>
               <motion.div 
                 animate={{ rotate: 360 }} 
                 transition={{ duration: 40, repeat: Infinity, ease: "linear" }}
@@ -2017,10 +2186,10 @@ export default function App() {
                 scale: isSpeaking ? 1.2 : 1
               }}
               transition={{ duration: 2, repeat: Infinity, repeatType: "reverse" }}
-              className={`absolute w-[600px] h-[600px] ${isAlert ? 'bg-red-600' : 'bg-cyan-600'} rounded-full blur-[150px] pointer-events-none`}
+              className={`absolute w-[600px] h-[600px] ${isAlert ? 'bg-red-600' : 'bg-cyan-600'} rounded-full blur-[150px] pointer-events-none transition-all duration-700`}
             />
 
-            <div className="relative z-10 flex flex-col items-center pointer-events-auto">
+            <div className={`relative z-10 flex flex-col items-center pointer-events-auto transition-all duration-700`}>
               <motion.button
                 onClick={connectionState === 'connected' ? disconnect : connect}
                 disabled={connectionState === 'connecting'}
@@ -2392,6 +2561,203 @@ export default function App() {
           )}
         </div>
       </div>
+
+      {/* SEPARATE WHITEBOARD MODAL */}
+      <AnimatePresence>
+        {isWhiteboardOpen && (
+          <motion.div
+            initial={{ opacity: 0, scale: 0.95, y: 50 }}
+            animate={{ opacity: 1, scale: 1, y: 0 }}
+            exit={{ opacity: 0, scale: 0.95, y: 50 }}
+            drag
+            dragMomentum={false}
+            style={{ backgroundColor: boardBg }}
+            className={`fixed top-10 left-10 w-[800px] max-w-[90vw] h-[600px] max-h-[80vh] z-[100] backdrop-blur-3xl border-2 ${isAlert ? 'border-red-500/50' : 'border-cyan-500/50'} rounded-3xl flex flex-col shadow-[0_0_150px_rgba(6,182,212,0.2)] overflow-hidden cursor-move`}
+          >
+            {/* Header */}
+            <div className={`flex justify-between items-center px-4 py-3 border-b ${isAlert ? 'border-red-500/30' : 'border-cyan-500/30'} bg-[linear-gradient(90deg,rgba(0,0,0,0.4),transparent)]`} onPointerDownCapture={e => e.stopPropagation()}>
+              <h2 className={`text-lg font-mono tracking-widest ${isAlert ? 'text-red-400' : 'text-cyan-400'} uppercase font-bold flex items-center gap-2 select-none`}>
+                <Presentation className="w-5 h-5" />
+                WHITEBOARD
+              </h2>
+              
+              <div className="flex items-center gap-3">
+                <div className="flex items-center gap-2 bg-black/40 rounded px-2 py-1">
+                  <Palette className="w-4 h-4 text-neutral-400" />
+                  <input type="color" value={boardBg} onChange={e => setBoardBg(e.target.value)} className="w-6 h-6 rounded cursor-pointer" title="Background Color" />
+                  <input type="color" value={boardColor} onChange={e => setBoardColor(e.target.value)} className="w-6 h-6 rounded cursor-pointer" title="Text & Pen Color" />
+                </div>
+                
+                <button 
+                  onClick={() => setIsDrawingMode(!isDrawingMode)}
+                  className={`px-3 py-1 rounded text-xs font-mono border ${isDrawingMode ? 'bg-cyan-900 border-cyan-400 text-cyan-50' : 'bg-black/40 border-neutral-600 text-neutral-300'}`}
+                >
+                  <Pen className="w-3 h-3 inline mr-1 -mt-0.5" />
+                  DRAW
+                </button>
+                
+                <button 
+                  onClick={() => {
+                    const canvas = drawCanvasRef.current;
+                    if (canvas && sessionRef.current) {
+                       const offscreen = document.createElement('canvas');
+                       offscreen.width = canvas.width;
+                       offscreen.height = canvas.height;
+                       const ctx = offscreen.getContext('2d');
+                       if (ctx) {
+                         ctx.fillStyle = boardBg;
+                         ctx.fillRect(0,0,offscreen.width,offscreen.height);
+                         ctx.drawImage(canvas, 0, 0);
+                         const base64 = offscreen.toDataURL('image/jpeg').split(',')[1];
+                         sessionRef.current.sendRealtimeInput([
+                           { text: "I have drawn something on the whiteboard for you. Please read it, analyze it, and solve or explain it." },
+                           { mimeType: 'image/jpeg', data: base64 }
+                         ]);
+                         addLog("[USER] Sent drawing to AI for analysis.");
+                         setChatMessages(prev => [...prev, { sender: 'user', text: '*Sent Whiteboard Drawing for Analysis*', isFinished: true }]);
+                       }
+                    }
+                  }}
+                  className={`px-3 py-1 rounded text-xs font-mono font-bold border ${isAlert ? 'bg-red-900/50 border-red-500 text-red-100 hover:bg-red-800' : 'bg-cyan-900/50 border-cyan-500 text-cyan-100 hover:bg-cyan-800'}`}
+                >
+                  <Send className="w-3 h-3 inline mr-1 -mt-0.5" />
+                  ANALYZE
+                </button>
+
+                <button 
+                  onClick={() => {
+                     const ctx = drawCanvasRef.current?.getContext('2d');
+                     if (ctx && drawCanvasRef.current) ctx.clearRect(0,0,drawCanvasRef.current.width,drawCanvasRef.current.height);
+                  }}
+                  className="p-1.5 rounded hover:bg-black/40 text-neutral-400 hover:text-white"
+                  title="Clear Drawing"
+                >
+                  <Eraser className="w-4 h-4" />
+                </button>
+                
+                <div className="w-px h-6 bg-neutral-700 mx-1"></div>
+
+                <button 
+                  onClick={() => setIsWhiteboardOpen(false)} 
+                  className={`text-sm ${isAlert ? 'text-red-600 hover:text-red-400' : 'text-cyan-600 hover:text-cyan-400'} font-mono tracking-widest flex items-center gap-1 cursor-default`}
+                >
+                  [ CLOSE ]
+                </button>
+              </div>
+            </div>
+            
+            {/* Content Area */}
+            <div className="flex-1 relative overflow-hidden" onPointerDownCapture={(e) => e.stopPropagation()}>
+              
+              {/* Text Layer (underneath if drawing, or interactable if not drawing) */}
+              <div 
+                className={`absolute inset-0 p-8 overflow-y-auto font-mono text-xl whitespace-pre-wrap leading-relaxed custom-scrollbar ${isDrawingMode ? 'pointer-events-none' : 'cursor-text'}`}
+                style={{ color: boardColor }}
+              >
+                {whiteboardContent ? (
+                  <div className="markdown-body prose max-w-none" style={{ color: boardColor }}>
+                    <Markdown>
+                      {whiteboardContent}
+                    </Markdown>
+                  </div>
+                ) : (
+                  <span className={`text-opacity-50 animate-pulse`} style={{ opacity: 0.5 }}>
+                    Initializing separate teaching sequence...
+                  </span>
+                )}
+              </div>
+
+              {/* Drawing Layer */}
+              <canvas
+                ref={drawCanvasRef}
+                className={`absolute inset-0 w-full h-full ${isDrawingMode ? 'cursor-crosshair' : 'pointer-events-none'}`}
+                onPointerDown={(e) => {
+                  if (!isDrawingMode || !drawCanvasRef.current) return;
+                  isDrawingCanvasRef.current = true;
+                  const rect = drawCanvasRef.current.getBoundingClientRect();
+                  lastPosRef.current = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+                  (e.target as Element).setPointerCapture(e.pointerId);
+                }}
+                onPointerMove={(e) => {
+                  if (!isDrawingMode || !isDrawingCanvasRef.current || !drawCanvasRef.current || !lastPosRef.current) return;
+                  const ctx = drawCanvasRef.current.getContext('2d');
+                  const rect = drawCanvasRef.current.getBoundingClientRect();
+                  if (ctx) {
+                    const currentX = e.clientX - rect.left;
+                    const currentY = e.clientY - rect.top;
+                    ctx.strokeStyle = boardColor;
+                    ctx.lineWidth = 3;
+                    ctx.lineCap = 'round';
+                    ctx.beginPath();
+                    ctx.moveTo(lastPosRef.current.x, lastPosRef.current.y);
+                    ctx.lineTo(currentX, currentY);
+                    ctx.stroke();
+                    lastPosRef.current = { x: currentX, y: currentY };
+                  }
+                }}
+                onPointerUp={(e) => {
+                  isDrawingCanvasRef.current = false;
+                  lastPosRef.current = null;
+                  (e.target as Element).releasePointerCapture(e.pointerId);
+                }}
+                onPointerCancel={(e) => {
+                  isDrawingCanvasRef.current = false;
+                  lastPosRef.current = null;
+                  (e.target as Element).releasePointerCapture(e.pointerId);
+                }}
+              />
+            </div>
+            
+            {/* Auto-resize canvas on open */}
+            {isWhiteboardOpen && <ResizeCanvasHelper drawCanvasRef={drawCanvasRef} />}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* RENDER CUSTOM WIDGETS */}
+      {customWidgets.map((widget) => (
+         <motion.div
+            key={widget.id}
+            initial={{ opacity: 0, scale: 0.8 }}
+            animate={{ opacity: 1, scale: 1 }}
+            drag
+            dragMomentum={false}
+            className={`fixed z-50 w-[400px] h-[300px] bg-neutral-900 border ${isAlert ? 'border-red-500' : 'border-cyan-500'} rounded shadow-2xl flex flex-col overflow-hidden resize`}
+            style={{ top: '20%', right: '5%' }}
+         >
+            <div className={`flex justify-between items-center px-2 py-1 bg-black/50 border-b ${isAlert ? 'border-red-900' : 'border-cyan-900'} cursor-move`} onPointerDownCapture={e => e.stopPropagation()}>
+               <div className={`text-xs font-mono font-bold tracking-widest flex items-center gap-2 ${isAlert ? 'text-red-400' : 'text-cyan-400'}`}>
+                 <LayoutTemplate className="w-3 h-3" /> WIDGET: {widget.name}
+               </div>
+               <button 
+                 onClick={() => {
+                   setCustomWidgets(prev => {
+                     const updated = prev.filter(w => w.id !== widget.id);
+                     if (userId) setDoc(doc(db, `users/${userId}/preferences/custom_widgets`), { widgets: updated }, { merge: true }).catch(console.error);
+                     return updated;
+                   });
+                 }}
+                 className="text-neutral-500 hover:text-white text-xs font-mono"
+               >[X]</button>
+            </div>
+            <iframe srcDoc={widget.code} className="w-full flex-1 bg-white" sandbox="allow-scripts allow-popups allow-forms" />
+         </motion.div>
+      ))}
+
     </div>
   );
+}
+
+// Small helper to resize canvas correctly after DOM mount
+function ResizeCanvasHelper({ drawCanvasRef }: { drawCanvasRef: React.RefObject<HTMLCanvasElement> }) {
+  useEffect(() => {
+    if (drawCanvasRef.current) {
+      const parent = drawCanvasRef.current.parentElement;
+      if (parent) {
+        drawCanvasRef.current.width = parent.clientWidth;
+        drawCanvasRef.current.height = parent.clientHeight;
+      }
+    }
+  }, [drawCanvasRef]);
+  return null;
 }

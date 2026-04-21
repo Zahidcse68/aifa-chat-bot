@@ -59,7 +59,9 @@ service cloud.firestore {
              data.userId == userId &&
              (!('userName' in data) || (data.userName is string && data.userName.size() < 100)) &&
              (!('faceEnrolled' in data) || data.faceEnrolled is bool) &&
-             (!('customInstruction' in data) || (data.customInstruction is string && data.customInstruction.size() < 50000));
+             (!('customInstruction' in data) || (data.customInstruction is string && data.customInstruction.size() < 50000)) &&
+             (!('messages' in data) || data.messages is list) &&
+             (!('widgets' in data) || data.widgets is list);
     }
 
     function isValidMemory(data, userId) {

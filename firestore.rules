@@ -58,7 +58,15 @@ service cloud.firestore {
       return hasRequiredFields(['userId']) &&
              data.userId == userId &&
              (!('userName' in data) || (data.userName is string && data.userName.size() < 100)) &&
-             (!('faceEnrolled' in data) || data.faceEnrolled is bool);
+             (!('faceEnrolled' in data) || data.faceEnrolled is bool) &&
+             (!('customInstruction' in data) || (data.customInstruction is string && data.customInstruction.size() < 50000));
+    }
+
+    function isValidMemory(data, userId) {
+      return hasRequiredFields(['id', 'text', 'userId']) &&
+             data.id is number &&
+             data.text is string && data.text.size() < 10000 &&
+             data.userId == userId;
     }
 
     // ===============================================================
@@ -68,6 +76,13 @@ service cloud.firestore {
       allow read: if isOwner(userId);
       allow create: if isOwner(userId) && isValidTask(request.resource.data, userId);
       allow update: if isOwner(userId) && isValidTask(request.resource.data, userId);
+      allow delete: if isOwner(userId);
+    }
+
+    match /users/{userId}/memories/{memoryId} {
+      allow read: if isOwner(userId);
+      allow create: if isOwner(userId) && isValidMemory(request.resource.data, userId);
+      allow update: if isOwner(userId) && isValidMemory(request.resource.data, userId);
       allow delete: if isOwner(userId);
     }
 

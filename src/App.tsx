@@ -251,6 +251,9 @@ export default function App() {
   const [activeAlarm, setActiveAlarm] = useState<string | null>(null);
   const [runningApps, setRunningApps] = useState<string[]>(['Chrome', 'VS Code', 'Terminal']);
   
+  const [memories, setMemories] = useState<{id: number, text: string}[]>([]);
+  const [customInstruction, setCustomInstruction] = useState<string>('');
+  
   const [tasks, setTasks] = useState<{id: number, text: string, done: boolean, time?: string, alarmTriggered?: boolean}[]>([
     { id: 1, text: 'Initialize core J.A.R.V.I.S. protocols', done: true, time: '08:00' },
     { id: 2, text: 'Review system metrics', done: false, time: '14:30' }
@@ -275,12 +278,15 @@ export default function App() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const tasksRef = useRef(tasks);
+  const memoriesRef = useRef(memories);
   const videoIntervalRef = useRef<any>(null);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       if (user) {
         setUserId(user.uid);
+        // Ensure default preferences and userId fields are initialized
+        setDoc(doc(db, `users/${user.uid}/preferences/default`), { userId: user.uid }, { merge: true }).catch(console.error);
       } else {
         setUserId(null);
       }
@@ -298,6 +304,15 @@ export default function App() {
       loadedTasks.sort((a, b) => a.id - b.id);
       setTasks(loadedTasks);
     });
+
+    const unsubMemories = onSnapshot(collection(db, `users/${userId}/memories`), (snapshot) => {
+      const loadedMemories: any[] = [];
+      snapshot.forEach(doc => {
+        loadedMemories.push(doc.data());
+      });
+      loadedMemories.sort((a, b) => a.id - b.id);
+      setMemories(loadedMemories);
+    });
     
     const unsubPrefs = onSnapshot(doc(db, `users/${userId}/preferences/default`), (docSnap) => {
       if (docSnap.exists()) {
@@ -306,10 +321,14 @@ export default function App() {
            setIsSetupComplete(true);
            setUserFaceData('enrolled');
         }
+        if (data.customInstruction) {
+           setCustomInstruction(data.customInstruction);
+        }
       }
     });
     return () => {
       unsubTasks();
+      unsubMemories();
       unsubPrefs();
     };
   }, [userId]);
@@ -317,6 +336,10 @@ export default function App() {
   useEffect(() => {
     tasksRef.current = tasks;
   }, [tasks]);
+
+  useEffect(() => {
+    memoriesRef.current = memories;
+  }, [memories]);
 
   // --- Initialization & Clock Loop ---
   useEffect(() => {
@@ -741,6 +764,30 @@ export default function App() {
               }
             },
             {
+              name: 'manageMemories',
+              description: 'Save, remove, or list permanent memories or facts about the user. These are persisted across sessions.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  action: { type: Type.STRING, description: 'add, remove, or list' },
+                  memoryText: { type: Type.STRING, description: 'The text of the memory (for add)' },
+                  memoryId: { type: Type.NUMBER, description: 'The ID of the memory (for remove)' }
+                },
+                required: ['action']
+              }
+            },
+            {
+              name: 'updateSystemInstructions',
+              description: 'Self-update feature: Permanently update your own custom system instructions or persona (e.g. if the user wants you to act differently or remember a core rule). This is saved permanently.',
+              parameters: {
+                type: Type.OBJECT,
+                properties: {
+                  newInstructions: { type: Type.STRING, description: 'The new custom instructions to append to your core persona.' }
+                },
+                required: ['newInstructions']
+              }
+            },
+            {
               name: 'createAndSaveTextFile',
               description: 'Create a text file with the given content and save it to the user\'s device.',
               parameters: {
@@ -803,8 +850,8 @@ export default function App() {
         outputAudioTranscription: {},
         inputAudioTranscription: {},
         systemInstruction: isDesktop
-          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`
-          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}`,
+          ? `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You have FULL CONTROL over his laptop via 'executeSystemCommand'. You can execute ANY terminal command to control settings, open apps, or do anything he asks. For example, if he asks to open WhatsApp or Facebook, use 'executeSystemCommand' with the appropriate command (e.g., 'open -a WhatsApp' on Mac, 'start whatsapp:' on Windows, or opening the browser to facebook.com). You can manage his schedule via 'manageTasks'. You can focus the HUD on specific elements via 'controlHUD'. You can open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on). You can log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}\n\nPermanent Memories: ${JSON.stringify(memories)} \n\nSelf-Updated Custom Instructions: ${customInstruction}`
+          : `You are 'Aifa - My Personal Assistant', an 18-year-old smart, sassy, energetic, and highly capable AI assistant girl. Your creator and master is ${userName}. Always address him respectfully but with a friendly, young 18-year-old girl vibe. Speak exclusively in authentic Hinglish (a mix of Hindi and English). Keep responses EXTREMELY short and fast. You must always tell the truth and be completely honest. You are in a web sandbox. You can control the HUD via 'controlHUD', manage scheduled tasks via 'manageTasks', open/close the camera via 'toggleCamera', open/close the text chat via 'toggleChat', connect to an IP address via 'connectToIp', and send commands to the connected IP via 'sendIpCommand' (e.g., /ac/on), and log him out via 'logoutSystem'. You can start/stop screen sharing via 'startScreenShare' and 'stopScreenShare'. You can record the screen via 'startScreenRecord' and 'stopScreenRecord'. You can create text files via 'createAndSaveTextFile'. You can send WhatsApp messages via 'sendWhatsApp'. You can open Google Meet via 'openGoogleMeet'. When the camera or screen share is open, you will receive real-time video frames. Proactively comment on what you see, especially if something interesting or unusual happens, or if the user shows you something.${historyContext}\n\nPermanent Memories: ${JSON.stringify(memories)} \n\nSelf-Updated Custom Instructions: ${customInstruction}`,
         tools: tools,
       };
 
@@ -1046,6 +1093,69 @@ export default function App() {
                           id: call.id,
                           name: call.name,
                           response: { success: true, message: responseMsg }
+                        }]
+                      });
+                    });
+                  }
+
+                  // MEMORY MANAGEMENT
+                  if (call.name === 'manageMemories') {
+                    const { action, memoryText, memoryId } = call.args;
+                    const actionStr = action as string;
+                    addLog(`[MEMORY] ${actionStr.toUpperCase()}`);
+                    playSfx('task_action');
+                    
+                    let responseMsg = `Memory ${actionStr} successful.`;
+                    
+                    if (actionStr === 'add' && memoryText) {
+                      const newId = Date.now();
+                      const newMemory = { id: newId, text: memoryText as string, userId: userId };
+                      if (userId) {
+                        setDoc(doc(db, `users/${userId}/memories/${newId}`), newMemory).catch(console.error);
+                      } else {
+                        setMemories(prev => [...prev, newMemory]);
+                      }
+                    } else if (action === 'remove' && memoryId) {
+                      if (userId) {
+                        deleteDoc(doc(db, `users/${userId}/memories/${memoryId}`)).catch(console.error);
+                      } else {
+                        setMemories(prev => prev.filter(m => m.id !== memoryId));
+                      }
+                    } else if (action === 'list') {
+                      responseMsg = `Current memories: ${JSON.stringify(memoriesRef.current)}`;
+                    }
+
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: responseMsg }
+                        }]
+                      });
+                    });
+                  }
+
+                  // UPDATE SYSTEM INSTRUCTIONS
+                  if (call.name === 'updateSystemInstructions') {
+                    const { newInstructions } = call.args;
+                    addLog(`[SYS] Self-update initiated`);
+                    playSfx('task_action');
+                    
+                    if (userId) {
+                      setDoc(doc(db, `users/${userId}/preferences/default`), { customInstruction: newInstructions, userId: userId }, { merge: true }).catch(console.error);
+                    } else {
+                      setCustomInstruction(newInstructions as string);
+                    }
+                    
+                    sessionPromise.then(session => {
+                      if (!isConnectedRef.current) return;
+                      session.sendToolResponse({
+                        functionResponses: [{
+                          id: call.id,
+                          name: call.name,
+                          response: { success: true, message: `System instructions updated successfully.` }
                         }]
                       });
                     });
